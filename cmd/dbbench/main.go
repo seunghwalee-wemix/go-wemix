@@ -407,6 +407,12 @@ func main() {
 			fmt.Printf("Cannot open DB %s: %v\n", dbPath, err)
 			return
 		}
+	case "kvssd":
+		db, err = ethdb.NewKvssdDatabase(dbPath, 1024, 1024)
+		if err != nil {
+			fmt.Printf("Cannot open Kvssd Device %s: %v\n", dbPath, err)
+			return
+		}
 	default:
 		usage()
 		return

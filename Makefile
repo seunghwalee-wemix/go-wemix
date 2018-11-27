@@ -28,12 +28,27 @@ ifneq ($(shell uname), Linux)
   USE_ROCKSDB = NO
 endif
 
+USE_KVSSD = YES
+
+ifneq ($(USE_KVSSD), NO)
+KVSSD_DIR=$(shell pwd)/build/_workspace/src/github.com/ethereum/go-ethereum/vendor/github.com/OpenMPDK/KVSSD/PDK/core
+CGO_CFLAGS  += -I$(KVSSD_DIR)/include
+CGO_LDFLAGS += -L$(KVSSD_DIR)/build/deps -lkvapi_static -lkvkdd_static -lnuma -lrt
+CGO_TAGS    += kvssd
+CXXFLAGS     = -MMD -MP -Wall -DLINUX -D_FILE_OFFSET_BITS=64 -fPIC -march=native -O2 -g -std=c++11
+LIBS        += $(KVSSD_DIR)/build/deps/libkvapi_static.a $(KVSSD_DIR)/build/deps/libkvkdd_static.a
+endif
+
 ifneq ($(USE_ROCKSDB), NO)
 ROCKSDB_DIR=$(shell pwd)/rocksdb
 ROCKSDB_TAG=-tags rocksdb
 endif
 
-metadium: gmet logrot
+ifneq ($(CGO_TAGS), "")
+	CGO_TAGS := -tags "$(CGO_TAGS)"
+endif
+
+metadium: gmet logrot dbbench cdbbench
 	@[ -d build/conf ] || mkdir -p build/conf
 	@cp -p metadium/scripts/gmet.sh metadium/scripts/solc.sh build/bin/
 	@cp -p metadium/scripts/config.json.example		\
@@ -100,6 +115,11 @@ clean:
 	@ROCKSDB_DIR=$(ROCKSDB_DIR);			\
 	if [ -e $${ROCKSDB_DIR}/Makefile ]; then	\
 		cd $${ROCKSDB_DIR};			\
+		make clean;				\
+	fi
+	@KVSSD_DIR=$(shell pwd)/vendor/github.com/OpenMPDK/KVSSD/PDK/core/build;	\
+	if [ -d $${KVSSD_DIR} ]; then			\
+		cd $${KVSSD_DIR};		  	\
 		make clean;				\
 	fi
 
