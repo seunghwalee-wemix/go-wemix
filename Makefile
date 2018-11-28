@@ -63,8 +63,16 @@ geth:
 	@echo "Done building."
 	@echo "Run \"$(GOBIN)/geth\" to launch geth."
 
-dbbench:
-	$(GORUN) build/ci.go install $(ROCKSDB_TAG) ./cmd/dbbench
+dbbench: rocksdb
+	CGO_CFLAGS=-I$(ROCKSDB_DIR)/include \
+		CGO_LDFLAGS="-L$(ROCKSDB_DIR) -lrocksdb -lm -lstdc++ $(shell awk '/PLATFORM_LDFLAGS/ {sub("PLATFORM_LDFLAGS=", ""); print} /JEMALLOC=1/ {print "-ljemalloc"}' < $(ROCKSDB_DIR)/make_config.mk)" \
+		$(GORUN) build/ci.go install $(ROCKSDB_TAG) ./cmd/dbbench
+
+cdbbench: cmd/cdbbench/cdbbench.c rocksdb kvssd
+	g++ $(CXXFLAGS) $(CGO_CFLAGS) $(CGO_LDFLAGS) -lcrypto -o build/bin/$@ cmd/cdbbench/cdbbench.c $(LIBS)
+
+cmet:
+	$(GORUN) build/ci.go install $(ROCKSDB_TAG) ./cmd/cmet
 
 all:
 	$(GORUN) build/ci.go install
