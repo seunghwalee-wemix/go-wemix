@@ -35,7 +35,36 @@ function header ()
 
 function usage ()
 {
-    echo "Usage: `basename $0` <options> <prefix> <loop-count> <per-loop>...."
+    echo "Usage: `basename $0` <options> [<prefix> <loop-count> <per-loop>]
+
+Options:
+-m <dir>:       metadium directory, META_DIR
+-d <dev>:       device to collect io stats from, e.g. nvme1n1, META_DEV
+-w:             to create a new contract for each turn, SWITCH_CONTRACTS
+-c <address>:   contract address, CMET_CONTRACT
+-a <password> <account-file>:   account password and file to use, CMET_ACCOUNT
+-b <js-file>:   contract file in .js, CMET_ABI
+-g <gas>:       gas amount, CMET_GAS
+-s <url>:       server url, CMET_URL
+-p <prefix>:    prefix, PREFIX
+-l <loop-count> <per-loop>:     loop and per loop count, LOOP_COUNT, PER_LOOP
+-r <rc-file>:   .rc file to source above variables
+
+Examples:
+
+# to create kv-store contract
+$ cmet -s http://localhost:8588 -g 10000000 -a password /opt/meta/keystore/account-1 deploy /opt/meta/bin/kv-store.js
+
+# to run with existing contract
+\$ meta-bench.sh -m /opt/meta -d nvme0n1 -c 0xBbE0...9AaA -a password /opt/meta/keystore/account-1 -b /opt/meta/bin/kv-store.js -g 10000000 -s http://localhost:8588 meta 10 1000000
+
+# to run with a new contract for each turn
+$ export META_DIR=/opt/meta META_DEV=nvme0n1 SWITCH_CONTRACTS=1 CMET_ACCOUNT="password /opt/meta/keystore/account-1" CMET_ABI=/opt/meta/bin/kv-store.js CMET_GAS=10000000 CMET_URL=http://localhost:8588
+$ meta-bench.sh beta 5 2000000
+
+# to run it with .rc file
+$ meta-bench.sh -r meta-bench.rc zeta 100 1000000
+"
 }
 
 function main ()
