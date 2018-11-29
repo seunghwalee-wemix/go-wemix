@@ -192,7 +192,7 @@ func bulk_func(numThreads int, producer func() func(int) int) {
 }
 
 func usage() {
-	fmt.Printf(
+	fmt.Fprintf(os.Stderr,
 		`Usage: cmet [options...] [deploy <contract.(js|.json)>+ |
     send <to> <amount> |
     kv-count | kv-put <key> <value> | kv-get <key> <value> |
@@ -250,7 +250,7 @@ func main() {
 			}
 			if !common.IsHexAddress(os.Args[i+1]) {
 				usage()
-				fmt.Println("Invalid contract address")
+				fmt.Fprintln(os.Stderr, "Invalid contract address")
 				os.Exit(1)
 			}
 			contractAddress = common.HexToAddress(os.Args[i+1])
@@ -331,7 +331,7 @@ func main() {
 	if gas == 0 {
 		if v := os.Getenv("CMET_GAS"); len(v) > 0 {
 			if gas, err = strconv.Atoi(v); err != nil {
-				fmt.Printf("Invalid gas value: %s\n", v)
+				fmt.Fprintf(os.Stderr, "Invalid gas value: %s\n", v)
 				return
 			}
 		}
@@ -350,14 +350,14 @@ func main() {
 		account, err = metclient.LoadAccount(accountPassword, accountFile)
 		if err != nil {
 			usage()
-			fmt.Println("Failed to load account:", err)
+			fmt.Fprintln(os.Stderr, "Failed to load account:", err)
 			os.Exit(1)
 		}
 
 		var cli *ethclient.Client
 		cli, err = ethclient.Dial(reqUrl)
 		if err != nil {
-			fmt.Println(err)
+			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
 
@@ -368,7 +368,7 @@ func main() {
 
 			contractData, err = loadContract(nargs[j])
 			if err != nil {
-				fmt.Printf("Cannot load a contract from %s: %s\n", nargs[j], err)
+				fmt.Fprintf(os.Stderr, "Cannot load a contract from %s: %s\n", nargs[j], err)
 				continue
 			}
 
@@ -377,14 +377,14 @@ func main() {
 				gas, gasPrice)
 			if err != nil {
 				cancel()
-				fmt.Printf("Deploying %s failed: %s\n", nargs[j], err)
+				fmt.Fprintf(os.Stderr, "Deploying %s failed: %s\n", nargs[j], err)
 				continue
 			}
 
 			receipt, err = metclient.GetContractReceipt(ctx, cli, hash, 500, 10000)
 			cancel()
 			if err != nil {
-				fmt.Printf("Contract failed: %s\n", err)
+				fmt.Fprintf(os.Stderr, "Contract failed: %s\n", err)
 			} else {
 				if receipt.Status == 1 {
 					fmt.Printf("Contract mined! ")
@@ -434,16 +434,16 @@ func main() {
 		tx, err = metclient.SendValue(ctx, cli, account, to, amount,
 			gas, gasPrice)
 		if err != nil {
-			fmt.Printf("Sending to %s failed: %s\n", nargs[1], err)
+			fmt.Fprintf(os.Stderr, "Sending to %s failed: %s\n", nargs[1], err)
 			os.Exit(1)
 		}
 
 		var receipt *types.Receipt
 		receipt, err = metclient.GetReceipt(ctx, cli, tx, 500, 10000)
 		if err != nil {
-			fmt.Printf("Failed to send to %s: %s\n", to.String(), err)
+			fmt.Fprintf(os.Stderr, "Failed to send to %s: %s\n", to.String(), err)
 		} else if receipt.Status != 1 {
-			fmt.Printf("Failed to send to %s: status = %d\n",
+			fmt.Fprintf(os.Stderr, "Failed to send to %s: status = %d\n",
 				nargs[1], receipt.Status)
 		} else {
 			fmt.Printf("Hash %s\n", tx.String())
@@ -506,7 +506,7 @@ func main() {
 		var tx common.Hash
 		tx, err = kvPut(ctr, []byte(nargs[1]), []byte(nargs[2]), false)
 		if err != nil {
-			fmt.Printf("Failed to put data: %s\n", err)
+			fmt.Fprintf(os.Stderr, "Failed to put data: %s\n", err)
 		} else {
 			fmt.Printf("Hash %s\n", tx.String())
 		}
@@ -533,7 +533,7 @@ func main() {
 		var value []byte
 		value, err = kvGet(ctr, []byte(nargs[1]))
 		if err != nil {
-			fmt.Printf("Failed to get: %s\n", err)
+			fmt.Fprintf(os.Stderr, "Failed to get: %s\n", err)
 		} else {
 			fmt.Println(string(value))
 		}
@@ -632,25 +632,21 @@ func main() {
 					}
 				}
 				if ei >= end {
-					if !silent {
-						fmt.Printf("Checking last tx %s...", tx.Hex())
-					}
+					fmt.Printf("Checking last tx %s...", tx.Hex())
 					ctx, cancel := context.WithCancel(context.Background())
 					j := 0
 					for {
 						r, e := ctr.Cli.TransactionReceipt(ctx, tx)
 						if e == nil {
-							if !silent {
-								if r.Status == 1 {
-									fmt.Printf("done.\n")
-								} else {
-									fmt.Printf("failed with status %d.\n",
-										r.Status)
-								}
+							if r.Status == 1 {
+								fmt.Printf("done.\n")
+							} else {
+								fmt.Fprintf(os.Stderr, "failed with status %d.\n",
+								r.Status)
 							}
 							break
 						} else {
-							if !silent && j%20 == 0 {
+							if j%20 == 0 {
 								fmt.Printf(".")
 							}
 							j++
