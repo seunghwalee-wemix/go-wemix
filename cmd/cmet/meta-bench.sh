@@ -64,14 +64,17 @@ function main ()
         STAT_START=$(${META_DIR}/bin/gmet attach ipc:${META_DIR}/geth.ipc --exec "debug.dbStats(\"${META_DEV}\", true)")
         T_START=$(date +%s)
 
-        ${META_DIR}/bin/cmet -q bulk-kv-put $PREFIX $IX $EIX $BATCH_SIZE
+        FN=/tmp/junk.$$
+        ${META_DIR}/bin/cmet -q bulk-kv-put $PREFIX $IX $EIX $BATCH_SIZE | tee $FN
+        TPS=$(cat $FN | awk '/^Took/ { print $6 }')
+        rm $FN
 
         T_END=$(date +%s)
         STAT_END=$(${META_DIR}/bin/gmet attach ipc:${META_DIR}/geth.ipc --exec "debug.dbStats(\"${META_DEV}\", 1)")
-        DU=$(du -sk ${META_DIR}/geth/ 2> /dev/null | awk '{print $1}')
+        DU=$(du -sk ${META_DIR}/geth/chaindata/ 2> /dev/null | awk '{print $1}')
         BUFFER_CACHE=$(free | awk '/^Mem:/ { print $6 }')
 
-        echo "" | awk -v si=$IX -v ei=$EIX -v ts=$T_START -v te=$T_END -v ss="$STAT_START" -v se="$STAT_END" -v du=$DU -v bc=$BUFFER_CACHE '{
+        echo "" | awk -v si=$IX -v ei=$EIX -v tps=$TPS -v ts=$T_START -v te=$T_END -v ss="$STAT_START" -v se="$STAT_END" -v du=$DU -v bc=$BUFFER_CACHE '{
   gsub("\\[|\\]|,", "", ss);
   gsub("\\[|\\]|,", "", se);
   if (split(ss, a) != 10 || split(se, b) != 10) {
@@ -82,7 +85,6 @@ function main ()
   } else {
     if ((dt = te - ts) <= 0)
       dt = 1;
-    tps = (ei - si + 1) / dt;
 
     rc = b[1] - a[1];
     rb = int((b[2] - a[2]) / 1024);

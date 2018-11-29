@@ -70,6 +70,7 @@ dbbench: rocksdb
 
 cdbbench: cmd/cdbbench/cdbbench.c rocksdb kvssd
 	g++ $(CXXFLAGS) $(CGO_CFLAGS) $(CGO_LDFLAGS) -lcrypto -o build/bin/$@ cmd/cdbbench/cdbbench.c $(LIBS)
+	rm build/bin/cdbbench.d
 
 cmet:
 	$(GORUN) build/ci.go install $(ROCKSDB_TAG) ./cmd/cmet
