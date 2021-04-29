@@ -68,8 +68,11 @@ dbbench: rocksdb
 		CGO_LDFLAGS="-L$(ROCKSDB_DIR) -lrocksdb -lm -lstdc++ $(shell awk '/PLATFORM_LDFLAGS/ {sub("PLATFORM_LDFLAGS=", ""); print} /JEMALLOC=1/ {print "-ljemalloc"}' < $(ROCKSDB_DIR)/make_config.mk)" \
 		$(GORUN) build/ci.go install $(ROCKSDB_TAG) ./cmd/dbbench
 
-cdbbench: cmd/cdbbench/cdbbench.c rocksdb kvssd
-	g++ $(CXXFLAGS) $(CGO_CFLAGS) $(CGO_LDFLAGS) -lcrypto -o build/bin/$@ cmd/cdbbench/cdbbench.c $(LIBS)
+cdbbench: cmd/cdbbench/cdbbench.c rocksdb
+	CXXFLAGS="-MMD -MP -Wall -DLINUX -D_FILE_OFFSET_BITS=64 -fPIC -march=native -O2 -g -std=c++11" \
+		CFLAGS=-I$(ROCKSDB_DIR)/include \
+		LDFLAGS="-L$(ROCKSDB_DIR) -lrocksdb -lm -lstdc++ $(shell awk '/PLATFORM_LDFLAGS/ {sub("PLATFORM_LDFLAGS=", ""); print} /JEMALLOC=1/ {print "-ljemalloc"}' < $(ROCKSDB_DIR)/make_config.mk)"; \
+		g++ $$CXXFLAGS $$CFLAGS $$LDFLAGS -lcrypto -lrocksdb -o build/bin/$@ cmd/cdbbench/cdbbench.c -lrocksdb
 	rm build/bin/cdbbench.d
 
 cmet:

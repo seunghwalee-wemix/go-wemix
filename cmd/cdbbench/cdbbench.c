@@ -12,7 +12,6 @@
 #include <openssl/sha.h>
 
 #include <rocksdb/c.h>
-#include <kvs_api.h>
 
 
 #define Static  static __attribute__((unused))
@@ -92,165 +91,6 @@ struct db_t {
     int (*get)(void *, char *, int, char **, int *);
 };
 
-/* kvssd utility functions */
-
-struct kvssd_t {
-    int (*close)(void *);
-    int (*put)(void *, char *, int, char *, int);
-    int (*get)(void *, char *, int, char **, int *);
-
-    kvs_device_handle dev;
-    kvs_container_handle ch;
-};
-
-Static int kvssd_close(struct kvssd_t *kvs)
-{
-    kvs_close_container(kvs->ch);
-    kvs_exit_env();
-    return 0;
-}
-
-Static int kvssd_drop(struct kvssd_t *kvs, char *container_name)
-{
-    return kvs_delete_container(kvs->dev, container_name);
-}
-
-Static int kvssd_put(struct kvssd_t *kvs, char *key, int keylen, char *value, int valuelen)
-{
-    kvs_store_context put_ctx = { { KVS_STORE_POST, false }, NULL, NULL };
-    kvs_key k = { key, (kvs_key_t) keylen };
-    kvs_value v = { value, (uint32_t) valuelen, 0, 0 };
-    return kvs_store_tuple(kvs->ch, &k, &v, &put_ctx);
-}
-
-Static int kvssd_get(struct kvssd_t *kvs, char *key, int keylen, char **value, int *valuelen)
-{
-    kvs_retrieve_context get_ctx = { { false, false }, NULL, NULL };
-    kvs_key k = { key, (kvs_key_t) keylen };
-    kvs_value v;
-    int rc, sz = 1024, repeat = 2;
-
-    while (repeat-- > 0) {
-        char *buf = (char *) malloc(sz);
-        if (buf == NULL)
-            return ENOMEM;
-
-        v.value = buf;
-        v.length = sz;
-        v.actual_value_size = 0;
-        v.offset = 0;
-        rc = kvs_retrieve_tuple(kvs->ch, &k, &v, &get_ctx);
-        if (rc == 0) {
-            if (sz > (int) v.actual_value_size) {
-                buf[v.actual_value_size] = 0;   // null-terminate it
-                *value = buf;
-                *valuelen = v.actual_value_size;
-                return 0;
-            } else {
-                free(buf);
-                sz = (v.actual_value_size + 1 + 31) / 32 * 32;
-                continue;
-            }
-        } else if (rc == KVS_ERR_VALUE_LENGTH_INVALID) {
-            free(buf);
-            sz = (v.actual_value_size + 1 + 31) / 32 * 32;
-            continue;
-        } else {
-            free(buf);
-            *value = NULL;
-            *valuelen = 0;
-            return rc;
-        }
-    }
-    return KVS_ERR_VALUE_LENGTH_INVALID;
-}
-
-Static char *kvssd_info(struct kvssd_t *kvs, char *t, int tl)
-{
-    kvs_device dev_info;
-    kvs_container container_info;
-    int rc, tix = 0;
-
-    if ((rc = kvs_get_device_info(kvs->dev, &dev_info)) != 0) {
-        snprintf(t, tl, "%s", kvs_errstr(rc));
-        return t;
-    }
-    if ((rc = kvs_get_container_info(kvs->ch, &container_info)) != 0) {
-        snprintf(t, tl, "%s", kvs_errstr(rc));
-        return t;
-    }
-
-    uint64_t unused = (uint64_t) dev_info.unalloc_capacity;
-
-#define Out(_fmt_, ...) do {                                            \
-    if (tix < tl)                                                       \
-        tix += snprintf(t + tix, tl - tix, _fmt_, ##__VA_ARGS__);       \
-} while (0)
-
-    Out("capacity: %ld\n"
-        "unalloc_capacity: %lu\n"
-        "max_value_len: %u\n"
-        "max_key_len: %u\n"
-        "optimal_value_len: %u\n"
-        "optimal_value_granularity: %u\n"
-        "%s:\n"
-        "  opened: %d\n"
-        "  scale: %u\n"
-        "  capacity: %lu\n"
-        "  free_size: %lu\n"
-        "  count: %lu\n",
-        dev_info.capacity,
-        unused,
-        dev_info.max_value_len,
-        dev_info.max_key_len,
-        dev_info.optimal_value_len,
-        dev_info.optimal_value_granularity,
-        container_info.name && container_info.name->name ? container_info.name->name : "",
-        container_info.opened,
-        container_info.scale,
-        container_info.capacity,
-        container_info.free_size,
-        container_info.count);
-    return t;
-
-#undef Out
-}
-
-Static int kvssd_open(struct kvssd_t *kvs, char *dev_name, char *container_name)
-{
-    kvs_init_options opts;
-    kvs_container_context ctx;
-    int rc;
-
-    memset(kvs, 0, sizeof(struct kvssd_t));
-    memset(&opts, 0, sizeof(opts));
-    memset(&ctx, 0, sizeof(ctx));
-
-    kvs_init_env_opts(&opts);
-    opts.memory.use_dpdk = 0;
-    opts.udd.core_mask_str[0] = '0';
-    opts.udd.core_mask_str[1] = 0;
-    opts.udd.cq_thread_mask[0] = '0';
-    opts.udd.cq_thread_mask[1] = 0;
-    opts.udd.mem_size_mb = 1024;
-    opts.udd.syncio = 1;
-    opts.emul_config_file = "dummy";
-    kvs_init_env(&opts);
-
-    if ((rc = kvs_open_device(dev_name, &kvs->dev)) != 0)
-        return rc;
-
-    ctx.option.ordering = KVS_KEY_ORDER_NONE;
-    kvs_create_container(kvs->dev, container_name, 0, &ctx);
-    kvs_open_container(kvs->dev, container_name, &kvs->ch);
-
-    kvs->close = (int (*)(void *)) kvssd_close;
-    kvs->put = (int (*)(void *, char *, int, char *, int)) kvssd_put;
-    kvs->get = (int (*)(void *, char *, int, char **, int *)) kvssd_get;
-
-    return 0;
-}
-
 
 // rocksdb functions
 
@@ -280,6 +120,8 @@ Static int rocks_put(rocks_t *rdb, char *key, int keylen, char *value, int value
 {
     char *err = NULL;
     rocksdb_put(rdb->db, rdb->wopts, key, keylen, value, valuelen, &err);
+    if (err != NULL)
+        fprintf(stderr, "put failed: %s\n", err);
     return err == NULL ? 0 : -1;
 }
 
@@ -287,6 +129,8 @@ Static int rocks_get(rocks_t *rdb, char *key, int keylen, char **value, int *val
 {
     char *err = NULL;
     *value = rocksdb_get(rdb->db, rdb->ropts, key, (size_t) keylen, (size_t *) valuelen, &err);
+    if (err != NULL)
+        fprintf(stderr, "get failed: %s\n", err);
     return err == 0 ? 0 : -1;
 }
 
@@ -468,7 +312,7 @@ Static void *writer(void *param)
 
         if ((rc = p->db->put(p->db, key, sizeof(key), value, p->value_size)) != 0) {
             printf("put failed for sha256('%s-%ld'): %s\n", p->prefix, ix,
-                   kvs_errstr(rc));
+                   strerror(errno));
             break;
         } else {
             cnt++;
@@ -538,7 +382,7 @@ Static void *rreader(void *param)
         rc = p->db->get(p->db, key, sizeof(key), &value, &valuelen);
         if (rc != 0) {
             if (p->verbose)
-                printf("failure: %s\n", kvs_errstr(rc));
+                printf("failure: %s\n", strerror(errno));
         } else {
             free(value);
         }
@@ -572,7 +416,7 @@ Static int do_rread(db_t *db, int n_threads, char *prefix, int count, int verbos
 
     for (int i = 0; i < n_threads; i++) {
         if ((rc = pthread_create(tids + i, NULL, rreader, &wp)) != 0) {
-            printf("Cannot start a thread: %s\n", strerror(rc));
+            printf("Cannot start a thread: %s\n", strerror(errno));
             return -1;
         }
     }
@@ -601,7 +445,7 @@ Static void usage(char *prog)
 \n\
 options:\n\
 -H:     no header\n\
--t rocksdb|kvssd:       choose between rocksdb or kvssd (rocksdb).\n\
+-t rocksdb:             choose db (rocksdb).\n\
 -d <device-name>:       where to collect disk stats from ("")\n\
 -r <num-threads>:       number of read threads (1)\n\
 -w <num-threads>:       number of write threads (1)\n\
@@ -633,7 +477,6 @@ Static void post(char *head, int64_t ot, int64_t count)
 int main(int argc, char *argv[])
 {
     struct rocks_t rdb;
-    struct kvssd_t kvs;
     db_t *db;
     char **nargv, *dev_name = NULL, *db_type = NULL, *db_name = NULL;
     int nargc = 0, read_threads = 1, write_threads = 1, verbose = 0,
@@ -670,7 +513,7 @@ int main(int argc, char *argv[])
     nargv = argv + optind;
 
     if (nargc <= 0 || db_type == NULL ||
-        !(strcmp(db_type, "kvssd") == 0 || strcmp(db_type, "rocksdb") == 0)) {
+        !(strcmp(db_type, "rocksdb") == 0)) {
         usage(argv[0]);
         return 0;
     }
@@ -678,14 +521,7 @@ int main(int argc, char *argv[])
     db_name = *nargv++;
     nargc--;
 
-    if (strcmp(db_type, "kvssd") == 0) {
-        if ((rc = kvssd_open(&kvs, db_name, (char *) "meta")) != 0) {
-            fprintf(stderr, "Failed to open kvssd %s: %s\n",
-                    db_name, kvs_errstr(rc));
-            return 1;
-        }
-        db = (db_t *) &kvs;
-    } else if (strcmp(db_type, "rocksdb") == 0) {
+    if (strcmp(db_type, "rocksdb") == 0) {
         if ((rc = rocks_open(&rdb, db_name)) != 0) {
             fprintf(stderr, "Failed to open rocksdb %s\n", db_name);
             return 1;
@@ -697,17 +533,7 @@ int main(int argc, char *argv[])
     }
 
     if (nargc > 0) {
-        if (nargc > 0 && strcmp(nargv[0], "info") == 0) {
-            char info[1024];
-            kvssd_info(&kvs, info, sizeof(info));
-            printf("%s\n", info);
-        } else if (nargc > 1 && strcmp(nargv[0], "drop") == 0) {
-            int rc = kvssd_drop(&kvs, nargv[1]);
-            if (rc == 0)
-                printf("Dropped '%s' successfully.\n", nargv[1]);
-            else
-                printf("Failed to drop '%s': %s\n", nargv[1], kvs_errstr(rc));
-        } else if (nargc >= 6 && strcmp(nargv[0], "write") == 0) {
+        if (nargc >= 6 && strcmp(nargv[0], "write") == 0) {
             // write prefix start count batch size
             int start, count, value_size;
             int64_t ct;
