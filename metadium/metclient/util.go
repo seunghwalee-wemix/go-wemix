@@ -394,7 +394,7 @@ func SendContract(ctx context.Context, contract *RemoteContract, method string,
 	return
 }
 
-func SendValue(ctx context.Context, cli *ethclient.Client, from *keystore.Key, to common.Address, amount, gas, _gasPrice int) (hash common.Hash, err error) {
+func SendValue(ctx context.Context, cli *ethclient.Client, from *keystore.Key, to common.Address, amount *big.Int, gas, _gasPrice int) (hash common.Hash, err error) {
 	chainId, gasPrice, nonce, err := GetOpportunisticTxParams(
 		ctx, cli, from.Address, false, true)
 	if err != nil {
@@ -405,8 +405,7 @@ func SendValue(ctx context.Context, cli *ethclient.Client, from *keystore.Key, t
 	}
 
 	var tx, stx *types.Transaction
-	tx = types.NewTransaction(nonce.Uint64(), to, big.NewInt(int64(amount)),
-		uint64(gas), gasPrice, nil)
+	tx = types.NewTransaction(nonce.Uint64(), to, amount, uint64(gas), gasPrice, nil)
 
 	signer := types.NewEIP155Signer(chainId)
 	stx, err = types.SignTx(tx, signer, from.PrivateKey)

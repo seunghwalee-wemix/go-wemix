@@ -7,8 +7,10 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"math/rand"
 	"os"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -146,7 +148,7 @@ func kvGet(ctr *metclient.RemoteContract, key []byte) (value []byte, err error) 
 	return
 }
 
-func bulk_func(numThreads int, producer func() func(int) int) {
+func BulkFunc(numThreads int, silent bool, producer func() func(int) int) {
 	t := time.Now().UnixNano()
 	n := int64(0)
 	jobs := make(chan func(int) int)
@@ -182,12 +184,216 @@ func bulk_func(numThreads int, producer func() func(int) int) {
 
 	wg.Wait()
 
-	t = (time.Now().UnixNano() - t) / 1000000 // to milliseconds
-	if n == 0 {
-		fmt.Printf("Took %d / 0 = Infinity tps\n", n)
-	} else {
-		fmt.Printf("Took %d / %.3f = %.3f tps\n", n, float64(t)/1000.0,
-			float64(n)/(float64(t)/1000.0))
+	if !silent {
+		t = (time.Now().UnixNano() - t) / 1000000 // to milliseconds
+		if n == 0 {
+			fmt.Printf("Took %d / 0 = Infinity tps\n", n)
+		} else {
+			fmt.Printf("Took %d / %.3f = %.3f tps\n", n, float64(t)/1000.0,
+				float64(n)/(float64(t)/1000.0))
+		}
+	}
+}
+
+func bulkSend(numThreads int, reqUrl, keysFile string, loop, count int, amount, froms, tos string, randomTo bool) {
+	var cli *ethclient.Client
+	cli, err := ethclient.Dial(reqUrl)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+
+	kr, err := OpenNamedKeys(keysFile, true)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "canot open keys file %s: %v\n", keysFile, err)
+		os.Exit(1)
+	}
+
+	var fromInfos []*AcctInfo
+	var toAddrs []common.Address
+
+	toInt := func(s string, d int) int {
+		if v, e := strconv.Atoi(s); e == nil {
+			return v
+		}
+		return d
+	}
+
+	// from accounts
+	func() {
+		fmt.Printf("loading from accounts: ")
+		ls := strings.Split(froms, ",")
+		if len(ls) == 3 && toInt(ls[1], -1) >= 0 && toInt(ls[2], -1) > 0 {
+			start := toInt(ls[1], -1)
+			count := toInt(ls[2], -1)
+			fromInfos = make([]*AcctInfo, count)
+
+			ix := int64(start)
+			BulkFunc(runtime.NumCPU()*2, false, func() func(int) int {
+				jx := atomic.AddInt64(&ix, 1) - 1
+				if jx >= int64(start+count) {
+					return nil
+				}
+				return func(gid int) int {
+					nx := fmt.Sprintf("%s%d", ls[0], jx)
+					info, err := kr.get(nx, common.Address{})
+					if err != nil {
+						panic(fmt.Sprintf("neither address nor name: %s %v", nx, err))
+					}
+					fromInfos[int(jx)-start] = info
+					return 1
+				}
+			})
+		} else {
+			fromInfos = make([]*AcctInfo, len(ls))
+			for i, j := range ls {
+				var addr common.Address
+				if common.IsHexAddress(j) {
+					addr = common.HexToAddress(j)
+				}
+				fromInfo, err := kr.get(j, addr)
+				if err != nil {
+					panic(fmt.Sprintf("neither address nor name: %s", j))
+				}
+				fromInfos[i] = fromInfo
+			}
+			fmt.Println("done.")
+		}
+	}()
+
+	// to addresses
+	func() {
+		fmt.Print("loading to addresses: ")
+		ls := strings.Split(tos, ",")
+		if len(ls) == 3 && toInt(ls[1], -1) >= 0 && toInt(ls[2], -1) > 0 {
+			start := toInt(ls[1], -1)
+			count := toInt(ls[2], -1)
+			toAddrs = make([]common.Address, count)
+
+			ix := int64(start)
+			BulkFunc(runtime.NumCPU()*2, false, func() func(int) int {
+				jx := atomic.AddInt64(&ix, 1) - 1
+				if jx >= int64(start+count) {
+					return nil
+				}
+				return func(gid int) int {
+					nx := fmt.Sprintf("%s%d", ls[0], jx)
+					if toAddr, err := kr.Name2Address(nx); err == nil {
+						toAddrs[int(jx)-start] = toAddr
+					} else {
+						panic(fmt.Sprintf("neither address nor name: %s", nx))
+					}
+					return 1
+				}
+			})
+		} else {
+			toAddrs = make([]common.Address, len(ls))
+			for i, j := range ls {
+				if common.IsHexAddress(j) {
+					toAddrs[i] = common.HexToAddress(j)
+				} else if toAddr, err := kr.Name2Address(j); err == nil {
+					toAddrs[i] = toAddr
+				} else {
+					panic(fmt.Sprintf("neither address nor name: %s", j))
+				}
+			}
+			fmt.Println("done.")
+		}
+	}()
+
+	if len(fromInfos) == 0 {
+		fmt.Fprintf(os.Stderr, "no from accounts")
+		return
+	}
+	if len(toAddrs) == 0 {
+		fmt.Fprintf(os.Stderr, "no to addresses")
+		return
+	}
+
+	kr.Seal()
+
+	sendValue := func(from *keystore.Key, to common.Address, amount string) (common.Hash, error) {
+		retryCount := 150
+		retryInterval := 200
+		var lastErr error
+
+		amt, ok := new(big.Int).SetString(amount, 10)
+		if !ok {
+			return common.Hash{}, fmt.Errorf("invalid amount")
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		for try := 0; try < retryCount; try++ {
+			tx, err := metclient.SendValue(ctx, cli, from, to, amt,
+				DefaultGas, 0)
+			if err == nil {
+				if lastErr != nil {
+					fmt.Fprintf(os.Stderr, "'%v' cleared\n", lastErr)
+				}
+				return tx, nil
+			} else {
+				if lastErr == nil || lastErr.Error() != err.Error() {
+					les := ""
+					if lastErr != nil {
+						les = lastErr.Error()
+					}
+					fmt.Fprintf(os.Stderr, "Got '%v' (was '%v')\n", err, les)
+				}
+				lastErr = err
+				time.Sleep(time.Duration(retryInterval) * time.Millisecond)
+				continue
+			}
+		}
+		return common.Hash{}, fmt.Errorf("timed out")
+	}
+
+	for lix := 0; lix < loop; lix++ {
+		ix := int64(0)
+		BulkFunc(numThreads, false, func() func(int) int {
+			jx := atomic.AddInt64(&ix, 1) - 1
+			if jx >= int64(count) {
+				return nil
+			}
+
+			fromIx := int(jx) % len(fromInfos)
+			var toIx int
+			if !randomTo {
+				toIx = (int(jx) / len(fromInfos)) % len(toAddrs)
+			} else {
+				toIx = rand.Intn(len(toAddrs))
+			}
+
+			return func(gid int) int {
+				from := fromInfos[fromIx]
+				to := toAddrs[toIx]
+
+				// fmt.Printf("%s -> %s\n", from.Name, to.Hex())
+				tx, err := sendValue(&from.Key, to, amount)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "failed to send %s -> %s: %v\n",
+						from.Name, to.Hex(), err)
+					return 0
+				}
+
+				if jx == int64(count)-1 {
+					fmt.Printf("Checking the receipt for the last tx %s\n", tx.Hex())
+					ctx, cancel := context.WithCancel(context.Background())
+					defer cancel()
+					receipt, err := metclient.GetReceipt(ctx, cli, tx, 500, 10000)
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "Failed to get receipt for %s: %s\n", tx.Hex(), err)
+					} else if receipt.Status != 1 {
+						fmt.Fprintf(os.Stderr, "Failed to send: status = %d\n",
+							receipt.Status)
+					} else {
+						fmt.Printf("Hash %s\n", tx.String())
+					}
+				}
+
+				return 1
+			}
+		})
 	}
 }
 
@@ -197,7 +403,9 @@ func usage() {
     send <to> <amount> |
     kv-count | kv-put <key> <value> | kv-get <key> <value> |
     bulk-kv-put <prefix> <start> <end> [<batch>] |
-    bulk-kv-get <prefix> <start> <end>]
+    bulk-kv-get <prefix> <start> <end> |
+    create-accounts <prefix> <start> <count> <file-name> |
+    bulk-send <loop> <count> <value> <froms> <tos>]
 
 options:
 -a <password> <account-file>: an ethereum account file and password (CMET_ACCOUNT)
@@ -209,6 +417,8 @@ options:
 -i <abi>:	ABI in .json or .js file, if not specified, env. var. CMET_ABI.
 -s <url>:	gmet url. CMET_URL.
 -t <count>:	number of workers
+-k <file>:  file that contains keys. CMET_KEYS.
+-r:         randomized to for bulk-send.
 -q:	silent
 `)
 }
@@ -224,6 +434,8 @@ func main() {
 		contractAddress              common.Address
 		abiFile                      string
 		gas, gasPrice                int = 0, 0
+		keysFile                     string
+		randomTo                     bool = false
 		err                          error
 	)
 
@@ -292,6 +504,15 @@ func main() {
 				}
 			}
 			i++
+		case "-k":
+			if i >= len(os.Args)-1 {
+				usage()
+				os.Exit(1)
+			}
+			keysFile = os.Args[i+1]
+			i++
+		case "-r":
+			randomTo = true
 		default:
 			nargs = append(nargs, os.Args[i])
 		}
@@ -408,9 +629,9 @@ func main() {
 		}
 		to := common.HexToAddress(nargs[1])
 
-		amount, err := strconv.Atoi(nargs[2])
-		if err != nil {
-			fmt.Println(err)
+		amount, ok := new(big.Int).SetString(nargs[2], 10)
+		if !ok {
+			fmt.Println("invalid amount")
 			os.Exit(1)
 		}
 
@@ -582,7 +803,7 @@ func main() {
 		}
 
 		i := start
-		bulk_func(numThreads, func() func(int) int {
+		BulkFunc(numThreads, false, func() func(int) int {
 			lock.Lock()
 			si := i
 			ei := si + per - 1
@@ -642,7 +863,7 @@ func main() {
 								fmt.Printf("done.\n")
 							} else {
 								fmt.Fprintf(os.Stderr, "failed with status %d.\n",
-								r.Status)
+									r.Status)
 							}
 							break
 						} else {
@@ -658,6 +879,44 @@ func main() {
 				return ei - si + 1
 			}
 		})
+
+	case "create-accounts":
+		if len(nargs) != 5 {
+			usage()
+			return
+		}
+		prefix := nargs[1]
+		start, e1 := strconv.Atoi(nargs[2])
+		count, e2 := strconv.Atoi(nargs[3])
+		if e1 != nil || start < 0 || e2 != nil || count <= 0 {
+			usage()
+			return
+		}
+		fn := nargs[4]
+
+		if err := CreatePrivKeys(fn, prefix, start, count); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to create private keys: %v\n", err)
+		}
+
+	case "bulk-send":
+		// bulk-send <loop> <count> <value> <froms> <tos>]
+		if len(nargs) != 6 {
+			usage()
+			return
+		}
+		loop, err := strconv.Atoi(nargs[1])
+		if err != nil || loop <= 0 {
+			usage()
+			return
+		}
+		count, err := strconv.Atoi(nargs[2])
+		if err != nil || count <= 0 {
+			usage()
+			return
+		}
+
+		bulkSend(numThreads, reqUrl, keysFile, loop, count, nargs[3], nargs[4],
+			nargs[5], randomTo)
 
 	default:
 		usage()
