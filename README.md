@@ -165,6 +165,29 @@ First download genesis.json from existing nodes to a data directory.
 After getting enodes of mining nodes, run gmet as follows.
 
     bin/gmet --syncmode full --datadir <data-directory> --bootnodes <enodes> --rpc --rpcaddr 0.0.0.0
+    
+### `cmet` For Stress Test
+
+First build `cmet` as it doesn't get built by default
+
+    make cmet
+    
+Create named private keys into a file, e.g. to create 100,000 accounts from `dude-1` to `dude-100000`.
+
+    cmet create-accounts dude- 1 100000 accts.100k
+    
+Fund one of the named accounts using an existing account
+
+    TOADDRESS=`grep dude-1, accts.100k | cut -d , -f 2`
+    cmet send -a "password" keystore/acct-1 $TOADDRESS 10000000000000000000
+    
+Fund from this named account to the other accounts
+
+    cmet bulk-send -k accts.100k 1 100000 dude-1 dude-,1,100000
+    
+Now it's time to send transactions among named accounts
+
+    cmet bulk-send -k accts.100k 10 1000000 dude-,1,100000 dude-1,1,100000
 
 ### The original go-ethereum README follows...
 
