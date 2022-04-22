@@ -196,11 +196,14 @@ func BulkFunc(numThreads int, silent bool, producer func() func(int) int) {
 }
 
 func bulkSend(numThreads int, reqUrl, keysFile string, loop, count int, amount, froms, tos string, randomTo bool) {
-	var cli *ethclient.Client
-	cli, err := ethclient.Dial(reqUrl)
-	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+	clis := make([]*ethclient.Client, numThreads)
+	for i := 0; i < numThreads; i += 1 {
+		cli, err := ethclient.Dial(reqUrl)
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+		clis[i] = cli
 	}
 
 	kr, err := OpenNamedKeys(keysFile, true)
@@ -312,7 +315,7 @@ func bulkSend(numThreads int, reqUrl, keysFile string, loop, count int, amount, 
 
 	kr.Seal()
 
-	sendValue := func(from *keystore.Key, to common.Address, amount string) (common.Hash, error) {
+	sendValue := func(cli *ethclient.Client, from *keystore.Key, to common.Address, amount string) (common.Hash, error) {
 		retryCount := 150
 		retryInterval := 200
 		var lastErr error
@@ -369,7 +372,8 @@ func bulkSend(numThreads int, reqUrl, keysFile string, loop, count int, amount, 
 				to := toAddrs[toIx]
 
 				// fmt.Printf("%s -> %s\n", from.Name, to.Hex())
-				tx, err := sendValue(&from.Key, to, amount)
+				cli := clis[fromIx%numThreads]
+				tx, err := sendValue(cli, &from.Key, to, amount)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "failed to send %s -> %s: %v\n",
 						from.Name, to.Hex(), err)
