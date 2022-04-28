@@ -22,6 +22,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/metadium/metclient"
+	"golang.org/x/time/rate"
 )
 
 var (
@@ -195,7 +196,7 @@ func BulkFunc(numThreads int, silent bool, producer func() func(int) int) {
 	}
 }
 
-func bulkSend(numThreads int, reqUrl, keysFile string, loop, count int, amount, froms, tos string, randomTo bool) {
+func bulkSend(numThreads int, reqUrl, keysFile string, loop, count int, amount, froms, tos string, randomTo bool, rateLimit int) {
 	clis := make([]*ethclient.Client, numThreads)
 	for i := 0; i < numThreads; i += 1 {
 		cli, err := ethclient.Dial(reqUrl)
@@ -351,6 +352,11 @@ func bulkSend(numThreads int, reqUrl, keysFile string, loop, count int, amount, 
 		return common.Hash{}, fmt.Errorf("timed out")
 	}
 
+	var rateLimiter *rate.Limiter
+	if rateLimit > 0 {
+		rateLimiter = rate.NewLimiter(rate.Limit(rateLimit), rateLimit)
+	}
+
 	for lix := 0; lix < loop; lix++ {
 		ix := int64(0)
 		BulkFunc(numThreads, false, func() func(int) int {
@@ -370,6 +376,10 @@ func bulkSend(numThreads int, reqUrl, keysFile string, loop, count int, amount, 
 			return func(gid int) int {
 				from := fromInfos[fromIx]
 				to := toAddrs[toIx]
+
+				if rateLimiter != nil {
+					rateLimiter.Wait(context.Background())
+				}
 
 				// fmt.Printf("%s -> %s\n", from.Name, to.Hex())
 				cli := clis[fromIx%numThreads]
@@ -419,6 +429,7 @@ options:
 -g <gas>:	gas amount (CMET_GAS)
 -p <gas-price>: gas price
 -i <abi>:	ABI in .json or .js file, if not specified, env. var. CMET_ABI.
+-l <rate>:	rate limiting, txs per second.
 -s <url>:	gmet url. CMET_URL.
 -t <count>:	number of workers
 -k <file>:  file that contains keys. CMET_KEYS.
@@ -440,6 +451,7 @@ func main() {
 		gas, gasPrice                int = 0, 0
 		keysFile                     string
 		randomTo                     bool = false
+		rateLimit                    int  = 0
 		err                          error
 	)
 
@@ -487,6 +499,8 @@ func main() {
 			i++
 		case "-g":
 			fallthrough
+		case "-l":
+			fallthrough
 		case "-p":
 			fallthrough
 		case "-t":
@@ -501,6 +515,8 @@ func main() {
 				switch os.Args[i] {
 				case "-g":
 					gas = v
+				case "-l":
+					rateLimit = v
 				case "-p":
 					gasPrice = v
 				case "-t":
@@ -920,7 +936,7 @@ func main() {
 		}
 
 		bulkSend(numThreads, reqUrl, keysFile, loop, count, nargs[3], nargs[4],
-			nargs[5], randomTo)
+			nargs[5], randomTo, rateLimit)
 
 	default:
 		usage()
