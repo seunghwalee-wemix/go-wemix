@@ -368,7 +368,7 @@ func bulkSend(numThreads int, reqUrl, keysFile string, loop, count int, amount, 
 			fromIx := int(jx) % len(fromInfos)
 			var toIx int
 			if !randomTo {
-				toIx = (int(jx) / len(fromInfos)) % len(toAddrs)
+				toIx = int(jx) % len(toAddrs)
 			} else {
 				toIx = rand.Intn(len(toAddrs))
 			}
