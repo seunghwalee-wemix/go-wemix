@@ -13,7 +13,7 @@ import (
 
 // account nonce cache map. Uses a global lock for now. If necessary,
 // need to use sync.Map instead.
-// Also we might have to maintain window ala tcp window to accomodate nonces
+// Also we might have to maintain window ala tcp window to accommodate nonces
 // used in failed transactions.
 var (
 	txParamsCache = &sync.Map{}

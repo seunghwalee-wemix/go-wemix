@@ -11,6 +11,8 @@ import (
 )
 
 var (
+	ErrNotInitialized = errors.New("not initialized")
+
 	IsMinerFunc            func() bool
 	AmPartnerFunc          func() bool
 	IsPartnerFunc          func(string) bool
@@ -69,7 +71,7 @@ func IsPoW() bool {
 
 func CalculateRewards(num, blockReward, fees *big.Int, addBalance func(common.Address, *big.Int)) (*common.Address, []byte, error) {
 	if CalculateRewardsFunc == nil {
-		return nil, nil, errors.New("Not initialized")
+		return nil, nil, ErrNotInitialized
 	} else {
 		return CalculateRewardsFunc(num, blockReward, fees, addBalance)
 	}
@@ -77,7 +79,7 @@ func CalculateRewards(num, blockReward, fees *big.Int, addBalance func(common.Ad
 
 func VerifyRewards(num *big.Int, rewards string) error {
 	if VerifyRewardsFunc == nil {
-		return errors.New("Not initialized")
+		return ErrNotInitialized
 	} else {
 		return VerifyRewardsFunc(num, rewards)
 	}
@@ -85,7 +87,7 @@ func VerifyRewards(num *big.Int, rewards string) error {
 
 func SignBlock(hash common.Hash) (nodeId, sig []byte, err error) {
 	if SignBlockFunc == nil {
-		err = errors.New("Not initialized")
+		err = ErrNotInitialized
 	} else {
 		nodeId, sig, err = SignBlockFunc(hash)
 	}
@@ -121,6 +123,52 @@ func SuggestGasPrice() *big.Int {
 		return big.NewInt(80 * params.GWei)
 	} else {
 		return SuggestGasPriceFunc()
+	}
+}
+
+var leadershipSink *chan struct{}
+
+func SubscribeToLeadership(ch *chan struct{}) {
+	leadershipSink = ch
+}
+
+func UnsubscribeToLeadership() {
+	leadershipSink = nil
+}
+
+func FeedLeadership() {
+	if leadershipSink != nil {
+		select {
+		case *leadershipSink <- struct{}{}:
+		default:
+		}
+	}
+}
+
+type MetaBlockHead struct {
+	Height int64
+	Hash   common.Hash
+}
+
+var blockImportedSink *chan MetaBlockHead
+
+func SubscribeToBlockImported(ch *chan MetaBlockHead) {
+	blockImportedSink = ch
+}
+
+func UnsubscribeToBlockImported() {
+	blockImportedSink = nil
+}
+
+func FeedBlockImported(height int64, hash common.Hash) {
+	if blockImportedSink != nil {
+		select {
+		case *blockImportedSink <- MetaBlockHead{Height: height, Hash: hash}:
+		default:
+			// if full, replace it
+			<-*blockImportedSink
+			*blockImportedSink <- MetaBlockHead{Height: height, Hash: hash}
+		}
 	}
 }
 
