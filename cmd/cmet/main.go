@@ -196,7 +196,7 @@ func BulkFunc(numThreads int, silent bool, producer func() func(int) int) {
 	}
 }
 
-func bulkSend(numThreads int, reqUrl, keysFile string, loop, count int, amount, froms, tos string, randomTo bool, rateLimit int) {
+func bulkSend(numThreads int, reqUrl, keysFile string, loop, count int, amount, froms, tos string, randomTo bool, rateLimit int, dynamicFee bool) {
 	clis := make([]*ethclient.Client, numThreads)
 	for i := 0; i < numThreads; i += 1 {
 		cli, err := ethclient.Dial(reqUrl)
@@ -330,7 +330,7 @@ func bulkSend(numThreads int, reqUrl, keysFile string, loop, count int, amount, 
 		defer cancel()
 		for try := 0; try < retryCount; try++ {
 			tx, err := metclient.SendValue(ctx, cli, from, to, amt,
-				DefaultGas, 0)
+				DefaultGas, dynamicFee)
 			if err == nil {
 				if lastErr != nil {
 					fmt.Fprintf(os.Stderr, "'%v' cleared\n", lastErr)
@@ -426,6 +426,7 @@ options:
 	-:	read from stdin
 	@<file-name>:	password is in <file-name> file
 -c <contract-address>:	if not specified, env. var. CMET_CONTRACT.
+-d:         use dyanmic base fee (eip1559)
 -g <gas>:	gas amount (CMET_GAS)
 -p <gas-price>: gas price
 -i <abi>:	ABI in .json or .js file, if not specified, env. var. CMET_ABI.
@@ -452,6 +453,7 @@ func main() {
 		keysFile                     string
 		randomTo                     bool = false
 		rateLimit                    int  = 0
+		dynamicFee                   bool = false
 		err                          error
 	)
 
@@ -483,6 +485,8 @@ func main() {
 			}
 			contractAddress = common.HexToAddress(os.Args[i+1])
 			i++
+		case "-d":
+			dynamicFee = true
 		case "-s":
 			if i >= len(os.Args)-1 {
 				usage()
@@ -673,7 +677,7 @@ func main() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		tx, err = metclient.SendValue(ctx, cli, account, to, amount,
-			gas, gasPrice)
+			gas, dynamicFee)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Sending to %s failed: %s\n", nargs[1], err)
 			os.Exit(1)
@@ -936,7 +940,7 @@ func main() {
 		}
 
 		bulkSend(numThreads, reqUrl, keysFile, loop, count, nargs[3], nargs[4],
-			nargs[5], randomTo, rateLimit)
+			nargs[5], randomTo, rateLimit, dynamicFee)
 
 	default:
 		usage()

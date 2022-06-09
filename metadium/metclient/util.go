@@ -248,7 +248,7 @@ func Deploy(ctx context.Context, cli *ethclient.Client, from *keystore.Key,
 	contractData *ContractData, args []interface{}, gas, _gasPrice int) (
 	hash common.Hash, err error) {
 	// pull transaction parameters from metadium node
-	chainId, gasPrice, nonce, err := GetOpportunisticTxParams(
+	chainId, gasPrice, nonce, err := GetOpportunisticTxParamsLegacy(
 		ctx, cli, from.Address, false, true)
 	if err != nil {
 		return
@@ -273,7 +273,7 @@ func Deploy(ctx context.Context, cli *ethclient.Client, from *keystore.Key,
 	tx = types.NewContractCreation(nonce.Uint64(), nil, uint64(gas), gasPrice,
 		data)
 
-	signer := types.NewEIP155Signer(chainId)
+	signer := types.NewLondonSigner(chainId)
 	stx, err = types.SignTx(tx, signer, from.PrivateKey)
 	if err != nil {
 		return
@@ -373,7 +373,7 @@ func SendContract(ctx context.Context, contract *RemoteContract, method string,
 		return
 	}
 
-	chainId, gasPrice, nonce, err := GetOpportunisticTxParams(
+	chainId, gasPrice, nonce, err := GetOpportunisticTxParamsLegacy(
 		ctx, contract.Cli, contract.From.Address, false, true)
 	if err != nil {
 		return
@@ -383,7 +383,7 @@ func SendContract(ctx context.Context, contract *RemoteContract, method string,
 	tx = types.NewTransaction(nonce.Uint64(), *contract.To, nil,
 		uint64(contract.Gas), gasPrice, data)
 
-	signer := types.NewEIP155Signer(chainId)
+	signer := types.NewLondonSigner(chainId)
 	stx, err = types.SignTx(tx, signer, contract.From.PrivateKey)
 	if err != nil {
 		return
@@ -398,20 +398,38 @@ func SendContract(ctx context.Context, contract *RemoteContract, method string,
 	return
 }
 
-func SendValue(ctx context.Context, cli *ethclient.Client, from *keystore.Key, to common.Address, amount *big.Int, gas, _gasPrice int) (hash common.Hash, err error) {
-	chainId, gasPrice, nonce, err := GetOpportunisticTxParams(
-		ctx, cli, from.Address, false, true)
+func SendValue(ctx context.Context, cli *ethclient.Client, from *keystore.Key, to common.Address, amount *big.Int, gas int, dynamicFee bool) (hash common.Hash, err error) {
+	chainId, maxTip, baseFee, gasPrice, nonce, tenthMultiple, err := GetOpportunisticTxParams(
+		ctx, cli, from.Address, false, true, dynamicFee)
 	if err != nil {
 		return
 	}
-	if _gasPrice > 0 {
-		gasPrice = big.NewInt(int64(_gasPrice))
-	}
 
 	var tx, stx *types.Transaction
-	tx = types.NewTransaction(nonce.Uint64(), to, amount, uint64(gas), gasPrice, nil)
+	if !dynamicFee {
+		tx = types.NewTransaction(nonce.Uint64(), to, amount, uint64(gas), gasPrice, nil)
+	} else {
+		if tenthMultiple < 10 {
+			tenthMultiple = 10
+		} else if tenthMultiple > 100 {
+			tenthMultiple = 100
+		}
+		maxFeePerGas := new(big.Int).Set(baseFee)
+		maxFeePerGas.Mul(maxFeePerGas, new(big.Int).SetInt64(int64(tenthMultiple)))
+		maxFeePerGas.Add(maxFeePerGas, maxTip)
 
-	signer := types.NewEIP155Signer(chainId)
+		tx = types.NewTx(&types.DynamicFeeTx{
+			ChainID:   chainId,
+			Nonce:     nonce.Uint64(),
+			GasTipCap: maxTip,
+			GasFeeCap: maxFeePerGas,
+			Gas:       uint64(gas),
+			To:        &to,
+			Value:     amount,
+		})
+	}
+
+	signer := types.NewLondonSigner(chainId)
 	stx, err = types.SignTx(tx, signer, from.PrivateKey)
 	if err != nil {
 		return
