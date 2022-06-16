@@ -122,7 +122,7 @@ func GetOpportunisticTxParamsDynamicFee(ctx context.Context, cli *ethclient.Clie
 	if !refresh && cid_ok {
 		chainId = new(big.Int).Set(cid.(*big.Int))
 	} else {
-		cid, err = cli.NetworkID(ctx)
+		cid, err = cli.ChainID(ctx)
 		if err != nil {
 			return
 		}
