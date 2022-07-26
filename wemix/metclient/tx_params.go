@@ -25,10 +25,22 @@ var (
 	baseFeeCheckTime     time.Time     = time.Time{}
 	baseFeeCheckDuration time.Duration = 1 * time.Second
 	baseFeeCheckCounter  int64
+
+	// hash lock for nonce check
+	nonceLocks []*sync.Mutex
 )
 
+func init() {
+	count := 1001
+	nonceLocks = make([]*sync.Mutex, count, count)
+	for i := 0; i < count; i++ {
+		nonceLocks[i] = &sync.Mutex{}
+	}
+}
+
 func GetOpportunisticTxParamsLegacy(ctx context.Context, cli *ethclient.Client, addr common.Address, refresh bool, incNonce bool) (chainId, gasPrice, nonce *big.Int, err error) {
-	n, n_ok := txParamsCache.Load(addr)
+	lck := nonceLocks[new(big.Int).SetBytes(addr.Bytes()).Uint64()%uint64(cap(nonceLocks))]
+	_, n_ok := txParamsCache.Load(addr)
 	cid, cid_ok := txParamsCache.Load("chain-id")
 	gp, gp_ok := txParamsCache.Load("gas-price")
 
@@ -36,10 +48,13 @@ func GetOpportunisticTxParamsLegacy(ctx context.Context, cli *ethclient.Client, 
 		// cache's good
 		chainId = new(big.Int).Set(cid.(*big.Int))
 		gasPrice = new(big.Int).Set(gp.(*big.Int))
+		lck.Lock()
+		n, _ := txParamsCache.Load(addr)
 		nonce = new(big.Int).Set(n.(*big.Int))
 		if incNonce {
 			txParamsCache.Store(addr, new(big.Int).Add(nonce, common.Big1))
 		}
+		lck.Unlock()
 		return
 	}
 
@@ -63,26 +78,35 @@ func GetOpportunisticTxParamsLegacy(ctx context.Context, cli *ethclient.Client, 
 		txParamsCache.Store("gas-price", gp)
 		gasPrice = new(big.Int).Set(gp.(*big.Int))
 	}
-
-	var n1, n2 uint64
-	n1, err = cli.PendingNonceAt(ctx, addr)
-	if err != nil {
-		return
-	}
-	n2, err = cli.NonceAt(ctx, addr, nil)
-	if err != nil {
-		return
-	}
-	if n1 < n2 {
-		n1 = n2
-	}
-
-	nonce = big.NewInt(int64(n1))
-	if !incNonce {
-		txParamsCache.Store(addr, nonce)
+	lck.Lock()
+	n, n_ok := txParamsCache.Load(addr)
+	if n_ok {
+		nonce = new(big.Int).Set(n.(*big.Int))
+		if incNonce {
+			txParamsCache.Store(addr, new(big.Int).Add(nonce, common.Big1))
+		}
 	} else {
-		txParamsCache.Store(addr, new(big.Int).Add(nonce, common.Big1))
+		var n1, n2 uint64
+		n1, err = cli.PendingNonceAt(ctx, addr)
+		if err != nil {
+			return
+		}
+		n2, err = cli.NonceAt(ctx, addr, nil)
+		if err != nil {
+			return
+		}
+		if n1 < n2 {
+			n1 = n2
+		}
+
+		nonce = big.NewInt(int64(n1))
+		if !incNonce {
+			txParamsCache.Store(addr, nonce)
+		} else {
+			txParamsCache.Store(addr, new(big.Int).Add(nonce, common.Big1))
+		}
 	}
+	lck.Unlock()
 
 	return
 }
@@ -97,7 +121,8 @@ func GetOpportunisticTxParamsDynamicFee(ctx context.Context, cli *ethclient.Clie
 		}()
 	}
 
-	n, n_ok := txParamsCache.Load(addr)
+	lck := nonceLocks[new(big.Int).SetBytes(addr.Bytes()).Uint64()%uint64(cap(nonceLocks))]
+	_, n_ok := txParamsCache.Load(addr)
 	cid, cid_ok := txParamsCache.Load("chain-id")
 	tip, tip_ok := txParamsCache.Load("max-tip")
 	basefee, basefee_ok := txParamsCache.Load("base-fee")
@@ -112,10 +137,13 @@ func GetOpportunisticTxParamsDynamicFee(ctx context.Context, cli *ethclient.Clie
 		maxTip = new(big.Int).Set(tip.(*big.Int))
 		baseFee = new(big.Int).Set(basefee.(*big.Int))
 		tenthMultiple = mf10.(float64)
+		lck.Lock()
+		n, _ := txParamsCache.Load(addr)
 		nonce = new(big.Int).Set(n.(*big.Int))
 		if incNonce {
 			txParamsCache.Store(addr, new(big.Int).Add(nonce, common.Big1))
 		}
+		lck.Unlock()
 		return
 	}
 
@@ -173,26 +201,35 @@ func GetOpportunisticTxParamsDynamicFee(ctx context.Context, cli *ethclient.Clie
 
 		baseFeeCheckTime = time.Now()
 	}
-
-	var n1, n2 uint64
-	n1, err = cli.PendingNonceAt(ctx, addr)
-	if err != nil {
-		return
-	}
-	n2, err = cli.NonceAt(ctx, addr, nil)
-	if err != nil {
-		return
-	}
-	if n1 < n2 {
-		n1 = n2
-	}
-
-	nonce = big.NewInt(int64(n1))
-	if !incNonce {
-		txParamsCache.Store(addr, nonce)
+	lck.Lock()
+	n, n_ok := txParamsCache.Load(addr)
+	if n_ok {
+		nonce = new(big.Int).Set(n.(*big.Int))
+		if incNonce {
+			txParamsCache.Store(addr, new(big.Int).Add(nonce, common.Big1))
+		}
 	} else {
-		txParamsCache.Store(addr, new(big.Int).Add(nonce, common.Big1))
+		var n1, n2 uint64
+		n1, err = cli.PendingNonceAt(ctx, addr)
+		if err != nil {
+			return
+		}
+		n2, err = cli.NonceAt(ctx, addr, nil)
+		if err != nil {
+			return
+		}
+		if n1 < n2 {
+			n1 = n2
+		}
+
+		nonce = big.NewInt(int64(n1))
+		if !incNonce {
+			txParamsCache.Store(addr, nonce)
+		} else {
+			txParamsCache.Store(addr, new(big.Int).Add(nonce, common.Big1))
+		}
 	}
+	lck.Unlock()
 
 	return
 }
