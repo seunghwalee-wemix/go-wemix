@@ -42,7 +42,7 @@ var AppHelpFlagGroups = []flags.FlagGroup{
 			utils.SmartCardDaemonPathFlag,
 			utils.NetworkIdFlag,
 			utils.MainnetFlag,
-			utils.MetaTestnetFlag,
+			utils.WemixTestnetFlag,
 			utils.GoerliFlag,
 			utils.RinkebyFlag,
 			utils.RopstenFlag,
@@ -219,7 +219,7 @@ var AppHelpFlagGroups = []flags.FlagGroup{
 		Flags: metricsFlags,
 	},
 	{
-		Name: "METADIUM",
+		Name: "WEMIX",
 		Flags: []cli.Flag{
 			utils.ConsensusMethodFlag,
 			utils.FixedDifficultyFlag,

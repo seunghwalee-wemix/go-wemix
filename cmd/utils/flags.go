@@ -138,16 +138,16 @@ var (
 	}
 	NetworkIdFlag = cli.Uint64Flag{
 		Name:  "networkid",
-		Usage: "Explicitly set network id (integer, 11=Metadium, 12=MetadiumTestnet)(For testnets: use --meta-testnet --ropsten, --rinkeby, --goerli instead)",
+		Usage: "Explicitly set network id (integer, 1111=WemixMainnet , 1112=WemixTestnet)(For testnets: use --wemix-testnet --ropsten, --rinkeby, --goerli instead)",
 		Value: ethconfig.Defaults.NetworkId,
 	}
 	MainnetFlag = cli.BoolFlag{
 		Name:  "mainnet",
 		Usage: "Ethereum mainnet",
 	}
-	MetaTestnetFlag = cli.BoolFlag{
-		Name:  "meta-testnet",
-		Usage: "Metadium test network: pre-configured metadium test network",
+	WemixTestnetFlag = cli.BoolFlag{
+		Name:  "wemix-testnet",
+		Usage: "Wemix test network: pre-configured wemix test network",
 	}
 	GoerliFlag = cli.BoolFlag{
 		Name:  "goerli",
@@ -795,10 +795,10 @@ var (
 		Value: metrics.DefaultConfig.InfluxDBOrganization,
 	}
 
-	// Metadium flags
+	// Wemix flags
 	ConsensusMethodFlag = cli.IntFlag{
 		Name:  "consensusmethod",
-		Usage: "Metadium consensus method (integer, 1=PoW, 2=PoA, 3=ETCD, 4=PBFT)",
+		Usage: "Wemix consensus method (integer, 1=PoW, 2=PoA, 3=ETCD, 4=PBFT)",
 		Value: 2,
 	}
 	FixedDifficultyFlag = cli.Uint64Flag{
@@ -852,27 +852,27 @@ var (
 		Value: params.Hub,
 	}
 	BlockInterval = cli.Int64Flag{
-		Name:  "metadium.block.interval",
+		Name:  "wemix.block.interval",
 		Usage: "Block generation interval in seconds",
 		Value: params.BlockInterval,
 	}
 	BlockTimeAdjBlocks = cli.Int64Flag{
-		Name:  "metadium.block.timeadjblocks",
+		Name:  "wemix.block.timeadjblocks",
 		Usage: "Block interval to ajdust timestamp",
 		Value: params.BlockTimeAdjBlocks,
 	}
 	BlockMinBuildTime = cli.Int64Flag{
-		Name:  "metadium.block.minbuildtime",
+		Name:  "wemix.block.minbuildtime",
 		Usage: "Minimum block generation time in ms",
 		Value: params.BlockMinBuildTime,
 	}
 	BlockMinBuildTxs = cli.Int64Flag{
-		Name:  "metadium.block.minbuildtxs",
+		Name:  "wemix.block.minbuildtxs",
 		Usage: "Minimum txs in a block with pending txs",
 		Value: params.BlockMinBuildTxs,
 	}
 	BlockTrailTime = cli.Int64Flag{
-		Name:  "metadium.block.trailtime",
+		Name:  "wemix.block.trailtime",
 		Usage: "Time to leave for block data transfer in ms",
 		Value: params.BlockTrailTime,
 	}
@@ -939,12 +939,12 @@ func setNodeUserIdent(ctx *cli.Context, cfg *node.Config) {
 // setBootstrapNodes creates a list of bootstrap nodes from the command line
 // flags, reverting to pre-configured ones if none have been specified.
 func setBootstrapNodes(ctx *cli.Context, cfg *p2p.Config) {
-	urls := params.MetadiumMainnetBootnodes
+	urls := params.WemixMainnetBootnodes
 	switch {
 	case ctx.GlobalIsSet(BootnodesFlag.Name):
 		urls = SplitAndTrim(ctx.GlobalString(BootnodesFlag.Name))
-	case ctx.GlobalBool(MetaTestnetFlag.Name):
-		urls = params.MetadiumTestnetBootnodes
+	case ctx.GlobalBool(WemixTestnetFlag.Name):
+		urls = params.WemixTestnetBootnodes
 	case ctx.GlobalBool(RopstenFlag.Name):
 		urls = params.RopstenBootnodes
 	case ctx.GlobalBool(SepoliaFlag.Name):
@@ -1559,7 +1559,7 @@ func CheckExclusive(ctx *cli.Context, args ...interface{}) {
 // SetEthConfig applies eth-related command line flags to the config.
 func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 	// Avoid conflicting network flags
-	CheckExclusive(ctx, MainnetFlag, MetaTestnetFlag, DeveloperFlag, RopstenFlag, RinkebyFlag, GoerliFlag, SepoliaFlag)
+	CheckExclusive(ctx, MainnetFlag, WemixTestnetFlag, DeveloperFlag, RopstenFlag, RinkebyFlag, GoerliFlag, SepoliaFlag)
 	CheckExclusive(ctx, LightServeFlag, SyncModeFlag, "light")
 	CheckExclusive(ctx, DeveloperFlag, ExternalSignerFlag) // Can't use both ephemeral unlocked and external signer
 	if ctx.GlobalString(GCModeFlag.Name) == "archive" && ctx.GlobalUint64(TxLookupLimitFlag.Name) != 0 {
@@ -1693,16 +1693,16 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 	switch {
 	case ctx.GlobalBool(MainnetFlag.Name):
 		if !ctx.GlobalIsSet(NetworkIdFlag.Name) {
-			cfg.NetworkId = 11
+			cfg.NetworkId = 1111
 		}
 		cfg.Genesis = core.DefaultGenesisBlock()
-		SetDNSDiscoveryDefaults(cfg, params.MetadiumMainnetGenesisHash)
-	case ctx.GlobalBool(MetaTestnetFlag.Name):
+		SetDNSDiscoveryDefaults(cfg, params.WemixMainnetGenesisHash)
+	case ctx.GlobalBool(WemixTestnetFlag.Name):
 		if !ctx.GlobalIsSet(NetworkIdFlag.Name) {
-			cfg.NetworkId = 12
+			cfg.NetworkId = 1112
 		}
 		cfg.Genesis = core.DefaultTestnetGenesisBlock()
-		SetDNSDiscoveryDefaults(cfg, params.MetadiumTestnetGenesisHash)
+		SetDNSDiscoveryDefaults(cfg, params.WemixTestnetGenesisHash)
 	case ctx.GlobalBool(RopstenFlag.Name):
 		if !ctx.GlobalIsSet(NetworkIdFlag.Name) {
 			cfg.NetworkId = 3
@@ -1803,10 +1803,12 @@ func SetDNSDiscoveryDefaults(cfg *ethconfig.Config, genesis common.Hash) {
 	}
 }
 
-// SetMetadiumConfig applies metadium related command line flags to the config.
-func SetMetadiumConfig(ctx *cli.Context, stack *node.Node, cfg *eth.Config) {
+// SetWemixConfig applies wemix related command line flags to the config.
+func SetWemixConfig(ctx *cli.Context, stack *node.Node, cfg *eth.Config) {
 	if ctx.GlobalIsSet(ConsensusMethodFlag.Name) {
 		params.ConsensusMethod = ctx.GlobalInt(ConsensusMethodFlag.Name)
+	} else {
+		params.ConsensusMethod = params.ConsensusPoA
 	}
 	if ctx.GlobalIsSet(FixedDifficultyFlag.Name) {
 		params.FixedDifficulty = ctx.GlobalUint64(FixedDifficultyFlag.Name)
@@ -1854,7 +1856,7 @@ func SetMetadiumConfig(ctx *cli.Context, stack *node.Node, cfg *eth.Config) {
 	if params.ConsensusMethod <= params.ConsensusInvalid || params.ConsensusMethod >= params.ConsensusETCD {
 		Fatalf("Invalid Consensus Method: %d", ctx.GlobalString(ConsensusMethodFlag.Name))
 	}
-	params.MetadiumGenesisFile = filepath.Join(ctx.GlobalString(DataDirFlag.Name), "genesis.json")
+	params.WemixGenesisFile = filepath.Join(ctx.GlobalString(DataDirFlag.Name), "genesis.json")
 }
 
 // RegisterEthService adds an Ethereum client to the stack.
@@ -2011,7 +2013,7 @@ func MakeGenesis(ctx *cli.Context) *core.Genesis {
 	switch {
 	case ctx.GlobalBool(MainnetFlag.Name):
 		genesis = core.DefaultGenesisBlock()
-	case ctx.GlobalBool(MetaTestnetFlag.Name):
+	case ctx.GlobalBool(WemixTestnetFlag.Name):
 		genesis = core.DefaultTestnetGenesisBlock()
 	case ctx.GlobalBool(RopstenFlag.Name):
 		genesis = core.DefaultRopstenGenesisBlock()

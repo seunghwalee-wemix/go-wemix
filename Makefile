@@ -3,7 +3,7 @@
 # don't need to bother with make.
 
 .PHONY: geth android ios evm all test clean rocksdb
-.PHONY: gnxt-linux
+.PHONY: gwemix-linux
 
 GOBIN = ./build/bin
 GO ?= latest
@@ -29,27 +29,27 @@ ROCKSDB_DIR=$(shell pwd)/rocksdb
 ROCKSDB_TAG=-tags rocksdb
 endif
 
-nxtmeta: gnxt logrot
+gwemix.tar.gz: gwemix logrot
 	@[ -d build/conf ] || mkdir -p build/conf
-	@cp -p metadium/scripts/gnxt.sh metadium/scripts/solc.sh build/bin/
-	@cp -p metadium/scripts/config.json.example		\
-		metadium/scripts/genesis-template.json		\
-		metadium/contracts/MetadiumGovernance.js	\
-		metadium/scripts/deploy-governance.js		\
+	@cp -p wemix/scripts/gwemix.sh wemix/scripts/solc.sh build/bin/
+	@cp -p wemix/scripts/config.json.example		\
+		wemix/scripts/genesis-template.json		\
+		wemix/contracts/WemixGovernance.js	\
+		wemix/scripts/deploy-governance.js		\
 		build/conf/
-	@(cd build; tar cfz nxtmeta.tar.gz bin conf)
-	@echo "Done building build/nxtmeta.tar.gz"
+	@(cd build; tar cfz gwemix.tar.gz bin conf)
+	@echo "Done building build/gwemix.tar.gz"
 
-gnxt: rocksdb metadium/governance_abi.go
+gwemix: rocksdb wemix/governance_abi.go
 ifeq ($(USE_ROCKSDB), NO)
-	$(GORUN) build/ci.go install $(ROCKSDB_TAG) ./cmd/gnxt
+	$(GORUN) build/ci.go install $(ROCKSDB_TAG) ./cmd/gwemix
 else
 	CGO_CFLAGS=-I$(ROCKSDB_DIR)/include \
 		CGO_LDFLAGS="-L$(ROCKSDB_DIR) -lrocksdb -lm -lstdc++ $(shell awk '/PLATFORM_LDFLAGS/ {sub("PLATFORM_LDFLAGS=", ""); print} /JEMALLOC=1/ {print "-ljemalloc"}' < $(ROCKSDB_DIR)/make_config.mk)" \
-		$(GORUN) build/ci.go install $(ROCKSDB_TAG) ./cmd/gnxt
+		$(GORUN) build/ci.go install $(ROCKSDB_TAG) ./cmd/gwemix
 endif
 	@echo "Done building."
-	@echo "Run \"$(GOBIN)/gnxt\" to launch gnxt."
+	@echo "Run \"$(GOBIN)/gwemix\" to launch gwemix."
 
 logrot:
 	$(GORUN) build/ci.go install ./cmd/logrot
@@ -78,7 +78,7 @@ cdbbench: cmd/cdbbench/cdbbench.c rocksdb
 cmet:
 	$(GORUN) build/ci.go install $(ROCKSDB_TAG) ./cmd/cmet
 
-all:
+all: wemix/governance_abi.go
 	$(GORUN) build/ci.go install
 
 android:
@@ -96,12 +96,12 @@ ios:
 test: all
 	$(GORUN) build/ci.go test
 
-lint: metadium/governance_abi.go ## Run linters.
+lint: wemix/governance_abi.go ## Run linters.
 	$(GORUN) build/ci.go lint
 
 clean:
 	env GO111MODULE=on go clean -cache
-	rm -fr build/_workspace/pkg/ $(GOBIN)/* build/conf metadium/admin_abi.go metadium/governance_abi.go
+	rm -fr build/_workspace/pkg/ $(GOBIN)/* build/conf wemix/admin_abi.go wemix/governance_abi.go
 	@ROCKSDB_DIR=$(ROCKSDB_DIR);			\
 	if [ -e $${ROCKSDB_DIR}/Makefile ]; then	\
 		cd $${ROCKSDB_DIR};			\
@@ -120,16 +120,17 @@ devtools:
 	@type "solc" 2> /dev/null || echo 'Please install solc'
 	@type "protoc" 2> /dev/null || echo 'Please install protoc'
 
-gnxt-linux:
+gwemix-linux:
 	@docker --version > /dev/null 2>&1;				\
 	if [ ! $$? = 0 ]; then						\
 		echo "Docker not found.";				\
 	else								\
-		docker build -t meta/builder:local			\
-			-f Dockerfile.metadium . &&			\
+		docker build -t wemix/builder:local			\
+			-f Dockerfile.wemix . &&			\
 		docker run -e HOME=/tmp --rm -v $(shell pwd):/data	\
-			-w /data meta/builder:local			\
-			make USE_ROCKSDB=$(USE_ROCKSDB);		\
+			-w /data wemix/builder:local			\
+			"git config --global --add safe.directory /data;\
+			 make USE_ROCKSDB=$(USE_ROCKSDB)";		\
 	fi
 
 ifneq ($(USE_ROCKSDB), YES)
@@ -141,7 +142,7 @@ rocksdb:
 endif
 
 AWK_CODE='								\
-BEGIN { print "package metadium"; bin = 0; name = ""; abi = ""; }	\
+BEGIN { print "package wemix"; bin = 0; name = ""; abi = ""; }	\
 /^{/ { bin = 1; abi = ""; name = ""; }					\
 /^}/ { bin = 0; abi = abi "}"; print "var " name "Abi = `" abi "`"; }	\
 {									\
@@ -154,13 +155,13 @@ BEGIN { print "package metadium"; bin = 0; name = ""; abi = ""; }	\
   }									\
 }'
 
-metadium/admin_abi.go: metadium/contracts/MetadiumAdmin-template.sol build/bin/solc
-	@PATH=${PATH}:build/bin metadium/scripts/solc.sh -f abi $< /tmp/junk.$$$$; \
+wemix/admin_abi.go: wemix/contracts/WemixAdmin-template.sol build/bin/solc
+	@PATH=${PATH}:build/bin wemix/scripts/solc.sh -f abi $< /tmp/junk.$$$$; \
 	cat /tmp/junk.$$$$ | awk $(AWK_CODE) > $@;	\
 	rm -f /tmp/junk.$$$$;
 
 AWK_CODE_2='								     \
-BEGIN { print "package metadium\n"; }					     \
+BEGIN { print "package wemix\n"; }					     \
 /^var Registry_contract/ {						     \
   sub("^var[^(]*\\(","",$$0); sub("\\);$$","",$$0);			     \
   n = "Registry";							     \
@@ -176,13 +177,13 @@ BEGIN { print "package metadium\n"; }					     \
   n = "EnvStorageImp";							     \
   print "var " n "Abi = `{ \"contractName\": \"" n "\", \"abi\": " $$0 "}`"; \
 }									     \
-/^var Gov_contract/ {							     \
+/^var GovImp_contract/ {							     \
   sub("^var[^(]*\\(","",$$0); sub("\\);$$","",$$0);			     \
   n = "Gov";								     \
   print "var " n "Abi = `{ \"contractName\": \"" n "\", \"abi\": " $$0 "}`"; \
 }'
 
-metadium/governance_abi.go: metadium/contracts/MetadiumGovernance.js
+wemix/governance_abi.go: wemix/contracts/WemixGovernance.js
 	@cat $< | awk $(AWK_CODE_2) > $@
 
 ifneq ($(shell uname), Linux)

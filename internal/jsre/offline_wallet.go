@@ -72,7 +72,7 @@ func offlineWalletNewId() string {
 			[]byte(uuid.NewRandom().String())))
 }
 
-// from metadium/metclient/util.go
+// from wemix/metclient/util.go
 // if password
 // - || "": read password from stdin
 // @<file-name>: <file-name> file has password
@@ -181,7 +181,7 @@ func (re *JSRE) offlineWalletOpen(call Call) (goja.Value, error) {
 	}
 
 	switch u.Scheme {
-	case "", "geth", "gmet":
+	case "", "geth", "gwemix":
 		id, addr, err := loadGethAccount(password, path)
 		if err != nil {
 			return nil, err

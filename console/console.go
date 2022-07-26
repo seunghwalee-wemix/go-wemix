@@ -139,7 +139,7 @@ func (c *Console) init(preload []string) error {
 		return err
 	}
 
-	// Metadium: set console prompter
+	// Wemix: set console prompter
 	jsre.PromptPassword = prompt.PromptPassword
 
 	// Add bridge overrides for web3.js functionality.
@@ -319,7 +319,7 @@ func (c *Console) AutoCompleteInput(line string, pos int) (string, []string, str
 // Welcome show summary of current Geth instance and some metadata about the
 // console's available modules.
 func (c *Console) Welcome() {
-	message := "Welcome to the Geth JavaScript console!\n\n"
+	message := "Welcome to the Gwemix JavaScript console!\n\n"
 
 	// Print some generic Geth metadata
 	if res, err := c.jsre.Run(`

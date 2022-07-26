@@ -21,7 +21,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
-	"github.com/ethereum/go-ethereum/metadium/metclient"
+	"github.com/ethereum/go-ethereum/wemix/metclient"
 	"golang.org/x/time/rate"
 )
 

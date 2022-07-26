@@ -51,10 +51,17 @@ func init() {
 	testTxPoolConfig = DefaultTxPoolConfig
 	testTxPoolConfig.Journal = ""
 
+	testTxPoolConfig.AccountSlots = 16
+	testTxPoolConfig.GlobalSlots = 4096 + 1024
+	testTxPoolConfig.AccountQueue = 64
+	testTxPoolConfig.GlobalQueue = 1024
+
 	cpy := *params.TestChainConfig
 	eip1559Config = &cpy
 	eip1559Config.BerlinBlock = common.Big0
 	eip1559Config.LondonBlock = common.Big0
+
+	params.DropUnderPriced = false
 }
 
 type testBlockChain struct {

@@ -26,15 +26,15 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
-	metaapi "github.com/ethereum/go-ethereum/metadium/api"
 	"github.com/ethereum/go-ethereum/p2p"
 	"github.com/ethereum/go-ethereum/rlp"
+	wemixapi "github.com/ethereum/go-ethereum/wemix/api"
 )
 
 const (
 	// maxKnownTxs is the maximum transactions hashes to keep in the known list
 	// before starting to randomly evict them.
-	maxKnownTxs = 32768
+	maxKnownTxs = 2000000
 
 	// maxKnownBlocks is the maximum block hashes to keep in the known list
 	// before starting to randomly evict them.
@@ -42,11 +42,11 @@ const (
 
 	// maxQueuedTxs is the maximum number of transactions to queue up before dropping
 	// older broadcasts.
-	maxQueuedTxs = 4096
+	maxQueuedTxs = 1500000
 
 	// maxQueuedTxAnns is the maximum number of transaction announcements to queue up
 	// before dropping older announcements.
-	maxQueuedTxAnns = 4096
+	maxQueuedTxAnns = 1500000
 
 	// maxQueuedBlocks is the maximum number of block propagations to queue up before
 	// dropping broadcasts. There's not much point in queueing stale blocks, so a few
@@ -379,12 +379,12 @@ func (p *Peer) ReplyReceiptsRLP(id uint64, receipts []rlp.RawValue) error {
 }
 
 // SendStatusEx sends this node's miner status
-func (p *Peer) SendStatusEx(status *metaapi.MetadiumMinerStatus) error {
+func (p *Peer) SendStatusEx(status *wemixapi.WemixMinerStatus) error {
 	return p2p.Send(p.rw, StatusExMsg, status)
 }
 
 // ReplyStatusEx is the eth/66 response to GetStatusEx
-func (p *Peer) ReplyStatusEx(id uint64, status *metaapi.MetadiumMinerStatus) error {
+func (p *Peer) ReplyStatusEx(id uint64, status *wemixapi.WemixMinerStatus) error {
 	return p2p.Send(p.rw, StatusExMsg, StatusExPacket66{
 		RequestId:      id,
 		StatusExPacket: StatusExPacket(*status),

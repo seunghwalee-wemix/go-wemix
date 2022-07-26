@@ -25,6 +25,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/trie"
+	wemixminer "github.com/ethereum/go-ethereum/wemix/miner"
 )
 
 // BlockValidator is responsible for validating block headers, uncles and
@@ -84,7 +85,7 @@ func (v *BlockValidator) ValidateState(block *types.Block, statedb *state.StateD
 	if block.GasUsed() != usedGas {
 		return fmt.Errorf("invalid gas used (remote: %d local: %d)", block.GasUsed(), usedGas)
 	}
-	if block.Fees().Cmp(fees) != 0 {
+	if !wemixminer.IsPoW() && block.Fees().Cmp(fees) != 0 {
 		return fmt.Errorf("invalid fees collected (remote: %v local: %v)", block.Fees(), fees)
 	}
 
@@ -113,6 +114,11 @@ func (v *BlockValidator) ValidateState(block *types.Block, statedb *state.StateD
 func CalcGasLimit(parentGasLimit, desiredLimit uint64) uint64 {
 	if params.FixedGasLimit != 0 {
 		return params.FixedGasLimit
+	} else if !wemixminer.IsPoW() {
+		if desiredLimit == 0 { // Wemix: governance is not initialized yet, inherit parent's gas limit
+			return parentGasLimit
+		}
+		return desiredLimit
 	}
 
 	delta := parentGasLimit/params.GasLimitBoundDivisor - 1

@@ -1,4 +1,4 @@
-// Copyright 2018 The go-metadium Authors
+// Copyright 2018-2022 The go-metadium / go-wemix Authors
 
 package miner
 
@@ -13,18 +13,19 @@ import (
 var (
 	ErrNotInitialized = errors.New("not initialized")
 
-	IsMinerFunc            func() bool
-	AmPartnerFunc          func() bool
-	IsPartnerFunc          func(string) bool
-	AmHubFunc              func(string) int
-	LogBlockFunc           func(int64, common.Hash)
-	CalculateRewardsFunc   func(*big.Int, *big.Int, *big.Int, func(common.Address, *big.Int)) (*common.Address, []byte, error)
-	VerifyRewardsFunc      func(*big.Int, string) error
-	SignBlockFunc          func(hash common.Hash) (nodeid, sig []byte, err error)
-	VerifyBlockSigFunc     func(height *big.Int, nodeId []byte, hash common.Hash, sig []byte) bool
-	RequirePendingTxsFunc  func() bool
-	VerifyBlockRewardsFunc func(height *big.Int) interface{}
-	SuggestGasPriceFunc    func() *big.Int
+	IsMinerFunc                 func() bool
+	AmPartnerFunc               func() bool
+	IsPartnerFunc               func(string) bool
+	AmHubFunc                   func(string) int
+	LogBlockFunc                func(int64, common.Hash)
+	CalculateRewardsFunc        func(*big.Int, *big.Int, *big.Int, func(common.Address, *big.Int)) (*common.Address, []byte, error)
+	VerifyRewardsFunc           func(*big.Int, string) error
+	SignBlockFunc               func(hash common.Hash) (nodeid, sig []byte, err error)
+	VerifyBlockSigFunc          func(height *big.Int, nodeId []byte, hash common.Hash, sig []byte) bool
+	RequirePendingTxsFunc       func() bool
+	VerifyBlockRewardsFunc      func(height *big.Int) interface{}
+	SuggestGasPriceFunc         func() *big.Int
+	GetBlockBuildParametersFunc func(height *big.Int) (blockInterval int64, maxBaseFee, gasLimit *big.Int, baseFeeMaxChangeRate, gasTargetPercentage int64, err error)
 )
 
 func IsMiner() bool {
@@ -120,9 +121,18 @@ func VerifyBlockRewards(height *big.Int) interface{} {
 
 func SuggestGasPrice() *big.Int {
 	if SuggestGasPriceFunc == nil {
-		return big.NewInt(80 * params.GWei)
+		return big.NewInt(100 * params.GWei)
 	} else {
 		return SuggestGasPriceFunc()
+	}
+}
+
+func GetBlockBuildParameters(height *big.Int) (blockInterval int64, maxBaseFee, gasLimit *big.Int, baseFeeMaxChangeRate, gasTargetPercentage int64, err error) {
+	if GetBlockBuildParametersFunc == nil {
+		// default values
+		return 15, big.NewInt(0), big.NewInt(0), 0, 100, ErrNotInitialized
+	} else {
+		return GetBlockBuildParametersFunc(height)
 	}
 }
 
@@ -145,14 +155,14 @@ func FeedLeadership() {
 	}
 }
 
-type MetaBlockHead struct {
+type WemixBlockHead struct {
 	Height int64
 	Hash   common.Hash
 }
 
-var blockImportedSink *chan MetaBlockHead
+var blockImportedSink *chan WemixBlockHead
 
-func SubscribeToBlockImported(ch *chan MetaBlockHead) {
+func SubscribeToBlockImported(ch *chan WemixBlockHead) {
 	blockImportedSink = ch
 }
 
@@ -163,11 +173,11 @@ func UnsubscribeToBlockImported() {
 func FeedBlockImported(height int64, hash common.Hash) {
 	if blockImportedSink != nil {
 		select {
-		case *blockImportedSink <- MetaBlockHead{Height: height, Hash: hash}:
+		case *blockImportedSink <- WemixBlockHead{Height: height, Hash: hash}:
 		default:
 			// if full, replace it
 			<-*blockImportedSink
-			*blockImportedSink <- MetaBlockHead{Height: height, Hash: hash}
+			*blockImportedSink <- WemixBlockHead{Height: height, Hash: hash}
 		}
 	}
 }

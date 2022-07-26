@@ -33,9 +33,9 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/log"
-	metaminer "github.com/ethereum/go-ethereum/metadium/miner"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/trie"
+	wemixminer "github.com/ethereum/go-ethereum/wemix/miner"
 )
 
 const (
@@ -95,7 +95,12 @@ type environment struct {
 	receipts []*types.Receipt
 	uncles   map[common.Hash]*types.Header
 
-	till *time.Time // nxtmeta: until when to block generation holds
+	// wemix parameters
+	till                 *time.Time // until when to block generation holds
+	blockInterval        int64
+	blockGasLimit        *big.Int
+	baseFeeMaxChangeRate int64
+	gasTargetPercentage  int64
 }
 
 // copy creates a deep copy of environment.
@@ -292,7 +297,11 @@ func newWorker(config *Config, chainConfig *params.ChainConfig, engine consensus
 
 	worker.wg.Add(4)
 	go worker.mainLoop()
-	go worker.newWorkLoopEx(recommit)
+	if wemixminer.IsPoW() {
+		go worker.newWorkLoop(recommit)
+	} else {
+		go worker.newWorkLoopEx(recommit)
+	}
 	go worker.resultLoop()
 	go worker.taskLoop()
 
@@ -512,7 +521,7 @@ func (w *worker) newWorkLoop(recommit time.Duration) {
 	}
 }
 
-// newWorkLoopEx is Metadium's standalone goroutine to submit new mining work upon received events.
+// newWorkLoopEx is Wemix's standalone goroutine to submit new mining work upon received events.
 func (w *worker) newWorkLoopEx(recommit time.Duration) {
 	defer w.wg.Done()
 
@@ -521,8 +530,8 @@ func (w *worker) newWorkLoopEx(recommit time.Duration) {
 
 	// to be notified when we become the leader / miner
 	leader := make(chan struct{}, 1)
-	metaminer.SubscribeToLeadership(&leader)
-	defer metaminer.UnsubscribeToLeadership()
+	wemixminer.SubscribeToLeadership(&leader)
+	defer wemixminer.UnsubscribeToLeadership()
 
 	// commitSimple just starts a new commitNewWork
 	commitSimple := func() {
@@ -552,7 +561,7 @@ func (w *worker) newWorkLoopEx(recommit time.Duration) {
 
 		case head := <-w.chainHeadCh:
 			// if leader & miner, may be waiting to sync with the previous miner
-			metaminer.FeedBlockImported(int64(head.Block.NumberU64()), head.Block.Hash())
+			wemixminer.FeedBlockImported(int64(head.Block.NumberU64()), head.Block.Hash())
 			clearPending(head.Block.NumberU64())
 			commitSimple()
 
@@ -592,9 +601,12 @@ func (w *worker) mainLoop() {
 	for {
 		select {
 		case req := <-w.newWorkCh:
-			// In metadium, costly interrupt / resubmit is disabled
-			// w.commitWork(req.interrupt, req.noempty, req.timestamp)
-			w.commitWork(nil, req.noempty, req.timestamp)
+			// In wemix, costly interrupt / resubmit is disabled
+			if wemixminer.IsPoW() {
+				w.commitWork(req.interrupt, req.noempty, req.timestamp)
+			} else {
+				w.commitWork(nil, req.noempty, req.timestamp)
+			}
 
 		case req := <-w.getWorkCh:
 			block, err := w.generateWork(req.params)
@@ -859,7 +871,7 @@ func (w *worker) makeEnv(parent *types.Block, header *types.Header, coinbase com
 
 // commitUncle adds the given block to uncle block set, returns error if failed to add.
 func (w *worker) commitUncle(env *environment, uncle *types.Header) error {
-	if !metaminer.IsPoW() {
+	if !wemixminer.IsPoW() {
 		return errors.New("We do not call uncles")
 	}
 	if w.isTTDReached(env.header) {
@@ -1309,10 +1321,11 @@ func (w *worker) prepareWork(genParams *generateParams) (*environment, error) {
 	if parent == nil {
 		return nil, fmt.Errorf("missing parent")
 	}
+	blockInterval, _, blockGasLimit, baseFeeMaxChangeRate, gasTargetPercentage, err := wemixminer.GetBlockBuildParameters(parent.Number())
 	// Sanity check the timestamp correctness, recap the timestamp
 	// to parent+1 if the mutation is allowed.
 	timestamp := genParams.timestamp
-	if metaminer.IsPoW() && parent.Time() >= timestamp {
+	if wemixminer.IsPoW() && parent.Time() >= timestamp {
 		if genParams.forceTime {
 			return nil, fmt.Errorf("invalid timestamp, parent %d given %d", parent.Time(), timestamp)
 		}
@@ -1322,22 +1335,9 @@ func (w *worker) prepareWork(genParams *generateParams) (*environment, error) {
 	num := parent.Number()
 	num.Add(num, common.Big1)
 
-	if true {
-		// nxtmeta
-		timestamp, till = w.timeIt()
-	} else {
-		// metadium
-		ts := w.ancestorTimes(num)
-		if dt, pt := w.throttleMining(ts); dt > 0 && pt < 1 {
-			// sleep 1 second here to prevent unnecessary checks
-			log.Info("Metadium: too many blocks", "ahead", dt)
-			time.Sleep(time.Second)
-			return nil, fmt.Errorf("too many blocks")
-		} else if w.eth.TxPool().PendingEmpty() {
-			if pt < int64(params.MaxIdleBlockInterval) {
-				return nil, fmt.Errorf("no pending transactions")
-			}
-		}
+	// wemix
+	if !wemixminer.IsPoW() {
+		timestamp, till = w.timeIt(int64(blockInterval))
 	}
 	header := &types.Header{
 		ParentHash: parent.Hash(),
@@ -1350,6 +1350,9 @@ func (w *worker) prepareWork(genParams *generateParams) (*environment, error) {
 	if !genParams.noExtra && len(w.extra) != 0 {
 		header.Extra = w.extra
 	}
+	if !wemixminer.IsPoW() {
+		header.GasLimit = core.CalcGasLimit(parent.GasLimit(), blockGasLimit.Uint64())
+	}
 	// Set the randomness field from the beacon chain if it's available.
 	if genParams.random != (common.Hash{}) {
 		header.MixDigest = genParams.random
@@ -1358,8 +1361,12 @@ func (w *worker) prepareWork(genParams *generateParams) (*environment, error) {
 	if w.chainConfig.IsLondon(header.Number) {
 		header.BaseFee = misc.CalcBaseFee(w.chainConfig, parent.Header())
 		if !w.chainConfig.IsLondon(parent.Number()) {
-			parentGasLimit := parent.GasLimit() * params.ElasticityMultiplier
-			header.GasLimit = core.CalcGasLimit(parentGasLimit, w.config.GasCeil)
+			if wemixminer.IsPoW() {
+				parentGasLimit := parent.GasLimit() * params.ElasticityMultiplier
+				header.GasLimit = core.CalcGasLimit(parentGasLimit, w.config.GasCeil)
+			} else {
+				header.GasLimit = parent.GasLimit()
+			}
 		}
 	}
 	// Run the consensus preparation with the default or customized consensus engine.
@@ -1375,7 +1382,13 @@ func (w *worker) prepareWork(genParams *generateParams) (*environment, error) {
 		log.Error("Failed to create sealing context", "err", err)
 		return nil, err
 	}
-	env.till = &till
+	if !wemixminer.IsPoW() {
+		env.till = &till
+	}
+	env.blockInterval = blockInterval
+	env.blockGasLimit = blockGasLimit
+	env.baseFeeMaxChangeRate = baseFeeMaxChangeRate
+	env.gasTargetPercentage = gasTargetPercentage
 	// Accumulate the uncles for the sealing work only if it's allowed.
 	if !genParams.noUncle {
 		commitUncles := func(blocks map[common.Hash]*types.Block) {
@@ -1440,6 +1453,7 @@ func (w *worker) refreshPending(locked bool) {
 
 	parent := w.chain.CurrentBlock()
 
+	blockInterval, _, blockGasLimit, baseFeeMaxChangeRate, gasTargetPercentage, _ := wemixminer.GetBlockBuildParameters(parent.Number())
 	num := parent.Number()
 	num.Add(num, common.Big1)
 	header := &types.Header{
@@ -1450,12 +1464,26 @@ func (w *worker) refreshPending(locked bool) {
 		Time:       uint64(time.Now().Unix()),
 		Fees:       big.NewInt(0),
 	}
+	if !wemixminer.IsPoW() {
+		header.GasLimit = core.CalcGasLimit(parent.GasLimit(), blockGasLimit.Uint64())
+	}
 	header.Coinbase = w.coinbase
+	// Set baseFee and GasLimit if we are on an EIP-1559 chain
+	if w.chainConfig.IsLondon(header.Number) {
+		header.BaseFee = misc.CalcBaseFee(w.chainConfig, parent.Header())
+		if !w.chainConfig.IsLondon(parent.Number()) {
+			header.GasLimit = parent.GasLimit()
+		}
+	}
 	if err := w.engine.Prepare(w.chain, header); err != nil {
 		log.Error("Failed to prepare header for mining", "err", err)
 		return
 	}
 	if env, err := w.makeEnv(parent, header, header.Coinbase); err == nil {
+		env.blockInterval = blockInterval
+		env.blockGasLimit = blockGasLimit
+		env.baseFeeMaxChangeRate = baseFeeMaxChangeRate
+		env.gasTargetPercentage = gasTargetPercentage
 		w.updateSnapshot(env)
 	}
 }
@@ -1472,7 +1500,11 @@ func (w *worker) generateWork(params *generateParams) (*types.Block, error) {
 	return w.engine.FinalizeAndAssemble(w.chain, work.header, work.state, work.txs, work.unclelist(), work.receipts)
 }
 
-func (w *worker) timeIt() (timestamp uint64, till time.Time) {
+func (w *worker) timeIt(blockInterval int64) (timestamp uint64, till time.Time) {
+	if blockInterval /= 1000; blockInterval <= 0 {
+		blockInterval = 1
+	}
+
 	maxPeekBack := int64(86400)   // don't look back further than this
 	tooBehindMultiple := int64(2) // ignore if > tooBehindMultiple * height * blockInterval
 
@@ -1481,7 +1513,7 @@ func (w *worker) timeIt() (timestamp uint64, till time.Time) {
 	num.Add(num, common.Big1)
 	now := time.Now()
 	nowInSeconds := now.Unix()
-	nowInMilliSeconds := now.UnixMilli()
+	nowInMilliSeconds := now.UnixNano() / 1e6 // convert to millisecond
 
 	check := func(heightToPeek int64) (offset int, height, stamp uint64, dt int64) {
 		if heightToPeek > maxPeekBack {
@@ -1499,10 +1531,10 @@ func (w *worker) timeIt() (timestamp uint64, till time.Time) {
 		height = uint64(n)
 		stamp = h.Time
 		dt = nowInSeconds - int64(stamp)
-		if heightToPeek*params.BlockInterval < dt && dt < tooBehindMultiple*heightToPeek*params.BlockInterval {
+		if heightToPeek*blockInterval < dt && dt < tooBehindMultiple*heightToPeek*blockInterval {
 			// behind
 			offset = -1
-		} else if dt < heightToPeek*params.BlockInterval {
+		} else if dt < heightToPeek*blockInterval {
 			// ahead
 			offset = 1
 		}
@@ -1511,7 +1543,7 @@ func (w *worker) timeIt() (timestamp uint64, till time.Time) {
 
 	ahead := 0
 	offset, height, _, dt := check(1)
-	log.Debug("Metadium time-it", "round", 1, "offset", offset, "height", height, "dt", dt)
+	log.Debug("time-it", "round", 1, "offset", offset, "height", height, "dt", dt)
 	if offset >= 0 {
 		if offset > 0 {
 			ahead++
@@ -1519,7 +1551,7 @@ func (w *worker) timeIt() (timestamp uint64, till time.Time) {
 		adjBlocks := params.BlockTimeAdjBlocks
 		for i := int64(0); i < params.BlockTimeAdjMultiple; i++ {
 			offset, height, _, dt = check(adjBlocks)
-			log.Debug("Metadium time-it", "round", adjBlocks, "offset", offset, "height", height, "dt", dt)
+			log.Debug("time-it", "round", adjBlocks, "offset", offset, "height", height, "dt", dt)
 			if offset < 0 {
 				break
 			} else if offset > 0 {
@@ -1542,24 +1574,24 @@ func (w *worker) timeIt() (timestamp uint64, till time.Time) {
 			// make sure that no more than 2 blocks have the same timestamp
 			tms = (nowInSeconds + 1) * 1000
 		}
-		till = time.UnixMilli(tms)
-		log.Debug("Metadium time-it", "behind", timestamp, "duration", tms-nowInMilliSeconds)
+		till = time.Unix(tms/1e3, (tms%1e3)*1e6)
+		log.Debug("time-it", "behind", timestamp, "duration", tms-nowInMilliSeconds)
 	case 1: // ahead, i.e. too many blocks, need to slow down
-		tms := nowInMilliSeconds + params.BlockInterval*1000 + params.BlockMinBuildTime
-		if tms/1000 > nowInSeconds+1 {
-			// make sure time stamp doesn't jump by 2
-			tms = (nowInSeconds+2)*1000 - params.BlockTrailTime
+		tms := nowInMilliSeconds + blockInterval*1000 + params.BlockMinBuildTime
+		if tms/1000 > nowInSeconds+blockInterval {
+			// make sure time stamp doesn't jump by blockInterval + 2
+			tms = (nowInSeconds+blockInterval+1)*1000 - params.BlockTrailTime
 		}
-		till = time.UnixMilli(tms)
-		log.Debug("Metadium time-it", "ahead", timestamp, "duration", tms-nowInMilliSeconds)
+		till = time.Unix(tms/1e3, (tms%1e3)*1e6)
+		log.Debug("time-it", "ahead", timestamp, "duration", tms-nowInMilliSeconds)
 	default: // on schedule
-		tms := nowInMilliSeconds + params.BlockInterval*1000 - params.BlockTrailTime
+		tms := nowInMilliSeconds + blockInterval*1000 - params.BlockTrailTime
 		if tms/1000 > nowInSeconds+1 {
 			// make sure time stamp doesn't jump by 2
 			tms = (nowInSeconds+2)*1000 - params.BlockTrailTime
 		}
-		till = time.UnixMilli(tms)
-		log.Debug("Metadium time-it", "on-schedule", timestamp, "duration", tms-nowInMilliSeconds)
+		till = time.Unix(tms/1e3, (tms%1e3)*1e6)
+		log.Debug("time-it", "on-schedule", timestamp, "duration", tms-nowInMilliSeconds)
 	}
 	return timestamp, till
 }
@@ -1572,7 +1604,7 @@ func (w *worker) commitWork(interrupt *int32, noempty bool, timestamp int64) {
 	} else {
 		return
 	}
-	if !metaminer.AmPartner() || !metaminer.IsMiner() {
+	if !wemixminer.IsPoW() && !wemixminer.IsMiner() {
 		w.refreshPending(true)
 		return
 	}
@@ -1597,7 +1629,7 @@ func (w *worker) commitWork(interrupt *int32, noempty bool, timestamp int64) {
 		return
 	}
 
-	if !metaminer.IsPoW() { // Metadium
+	if !wemixminer.IsPoW() { // Wemix
 		if !w.commitTransactionsEx(work, interrupt, start) {
 			w.commitEx(work, w.fullTaskHook, true, start)
 		}
@@ -1627,11 +1659,9 @@ func (w *worker) commitWork(interrupt *int32, noempty bool, timestamp int64) {
 // Note the assumption is held that the mutation is allowed to the passed env, do
 // the deep copy first.
 func (w *worker) commit(env *environment, interval func(), update bool, start time.Time) error {
-	if !metaminer.IsMiner() {
+	if !wemixminer.IsPoW() && !wemixminer.IsMiner() {
 		return errors.New("Not Miner")
 	}
-
-	panic("None should come here")
 
 	if w.isRunning() {
 		if interval != nil {
@@ -1665,10 +1695,10 @@ func (w *worker) commit(env *environment, interval func(), update bool, start ti
 	return nil
 }
 
-// In Metadium, uncles are not welcome and difficulty is so low,
+// In Wemix, uncles are not welcome and difficulty is so low,
 // there's no reason to run miners asynchronously.
 func (w *worker) commitEx(env *environment, interval func(), update bool, start time.Time) error {
-	if !metaminer.IsMiner() {
+	if !wemixminer.IsPoW() && !wemixminer.IsMiner() {
 		return errors.New("Not Miner")
 	}
 	if w.isRunning() {
@@ -1737,7 +1767,7 @@ func (w *worker) commitEx(env *environment, interval func(), update bool, start 
 				log.Info("Successfully sealed new block", "number", sealedBlock.Number(), "sealhash", sealhash, "hash", hash,
 					"elapsed", common.PrettyDuration(time.Since(createdAt)))
 
-				if !metaminer.IsMiner() {
+				if !wemixminer.IsPoW() && !wemixminer.IsMiner() {
 					return errors.New("Not Miner")
 				}
 

@@ -1,6 +1,6 @@
 /* admin.go */
 
-package metadium
+package wemix
 
 import (
 	"bytes"
@@ -20,23 +20,24 @@ import (
 	"go.etcd.io/etcd/server/v3/embed"
 
 	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/cmd/utils"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/log"
-	metaapi "github.com/ethereum/go-ethereum/metadium/api"
-	"github.com/ethereum/go-ethereum/metadium/metclient"
-	metaminer "github.com/ethereum/go-ethereum/metadium/miner"
 	"github.com/ethereum/go-ethereum/node"
 	"github.com/ethereum/go-ethereum/p2p"
 	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rpc"
+	wemixapi "github.com/ethereum/go-ethereum/wemix/api"
+	"github.com/ethereum/go-ethereum/wemix/metclient"
+	wemixminer "github.com/ethereum/go-ethereum/wemix/miner"
 )
 
-type metaNode struct {
+type wemixNode struct {
 	Name  string         `json:"name"`
 	Enode string         `json:"enode"`
 	Id    string         `json:"id"`
@@ -48,12 +49,12 @@ type metaNode struct {
 	Miner  bool   `json:"miner"`
 }
 
-type metaMember struct {
+type wemixMember struct {
 	Addr  common.Address `json:"address"`
 	Stake *big.Int       `json:"stake"`
 }
 
-type metaAdmin struct {
+type wemixAdmin struct {
 	stack *node.Node
 
 	bootNodeId  string // allowed to generate block without admin contract
@@ -73,32 +74,59 @@ type metaAdmin struct {
 	etcdPort    int
 	etcdTimeout time.Duration
 
-	lastBlock     int
-	modifiedBlock int
-	blocksPer     int
-	gasPrice      *big.Int
-	self          *metaNode
+	lastBlock     int64
+	modifiedBlock int64
+
+	blockInterval        int64
+	blocksPer            int64
+	blockReward          *big.Int
+	maxPriorityFeePerGas *big.Int
+	maxBaseFee           *big.Int
+	gasLimit             *big.Int
+	baseFeeMaxChangeRate int64
+	gasTargetPercentage  int64
+
+	self *wemixNode
 
 	lock  *sync.Mutex
-	nodes map[string]*metaNode
+	nodes map[string]*wemixNode
 
 	// # of blocks consecutively mined by this node
-	blocksMined int
+	blocksMined int64
 }
 
 // latest block generated
-type metaWork struct {
+type wemixWork struct {
 	Height int64       `json:"height"`
 	Hash   common.Hash `json:"hash"`
 }
 
+// block build parameters for caching
+type blockBuildParameters struct {
+	height               uint64
+	blockInterval        int64
+	maxBaseFee           *big.Int
+	gasLimit             *big.Int
+	baseFeeMaxChangeRate int64
+	gasTargetPercentage  int64
+}
+
+// reward related parameters
+type rewardParameters struct {
+	rewardAmount                   *big.Int
+	staker, ecoSystem, maintenance *common.Address
+	members                        []*wemixMember
+	distributionMethod             []*big.Int
+	blocksPer                      int64
+}
+
 var (
-	// "Metadium Registry"
-	magic, _        = big.NewInt(0).SetString("0x4d6574616469756d205265676973747279", 0)
-	etcdClusterName = "Metadium"
+	// "Wemix Registry"
+	magic, _        = big.NewInt(0).SetString("0x57656d6978205265676973747279", 0)
+	etcdClusterName = "Wemix"
 	big0            = big.NewInt(0)
 	nilAddress      = common.Address{}
-	admin           *metaAdmin
+	admin           *wemixAdmin
 
 	ErrNotRunning     = errors.New("not running")
 	ErrAlreadyRunning = errors.New("already running")
@@ -106,9 +134,13 @@ var (
 
 	etcdCompactFrequency = int64(100)
 	etcdCompactWindow    = int64(100)
+
+	// cached block build parameters
+	blockBuildParamsLock = &sync.Mutex{}
+	blockBuildParams     *blockBuildParameters
 )
 
-func (n *metaNode) eq(m *metaNode) bool {
+func (n *wemixNode) eq(m *wemixNode) bool {
 	if n.Name == m.Name && n.Id == m.Id && n.Ip == m.Ip && n.Port == m.Port {
 		return true
 	} else {
@@ -137,7 +169,7 @@ func toIdv4(id string) (string, error) {
 //   to generated blocks before admin contract is established.
 // 2) returns the coinbase of genesis block, which should be the admin
 //   contract creator
-func (ma *metaAdmin) getGenesisInfo() (string, common.Address, error) {
+func (ma *wemixAdmin) getGenesisInfo() (string, common.Address, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -148,9 +180,11 @@ func (ma *metaAdmin) getGenesisInfo() (string, common.Address, error) {
 
 	var nodeId string
 	if len(block.Extra) < 64 {
-		panic("Invalid bootnode id in the genesis block.")
+		return "", common.Address{}, fmt.Errorf("Invalid bootnode id in the genesis block")
 	} else if len(block.Extra) == 64 {
 		nodeId = hex.EncodeToString(block.Extra)
+	} else if len(block.Extra) <= 128 {
+		return "", common.Address{}, fmt.Errorf("Invalid bootnode id in the genesis block")
 	} else {
 		nodeId = string(block.Extra[len(block.Extra)-128:])
 	}
@@ -158,8 +192,26 @@ func (ma *metaAdmin) getGenesisInfo() (string, common.Address, error) {
 	return nodeId, block.Coinbase, nil
 }
 
+func (ma *wemixAdmin) getRegistryAddress(ctx context.Context, cli *ethclient.Client, registryAbi abi.ABI, height *big.Int) (*common.Address, error) {
+	contract := &metclient.RemoteContract{
+		Cli: cli,
+		Abi: registryAbi,
+	}
+	for i := uint64(0); i < 10; i++ {
+		addr := crypto.CreateAddress(ma.bootAccount, i)
+		contract.To = &addr
+
+		var v *big.Int
+		err := metclient.CallContract(ctx, contract, "magic", nil, &v, height)
+		if err == nil && v.Cmp(magic) == 0 {
+			return &addr, nil
+		}
+	}
+	return nil, wemixminer.ErrNotInitialized
+}
+
 // it should be the first transaction of the coinbase of the genesis block
-func (ma *metaAdmin) getAdminAddresses() (registry, gov, staking, envStorage *common.Address, err error) {
+func (ma *wemixAdmin) getAdminAddresses() (registry, gov, staking, envStorage *common.Address, err error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -171,24 +223,11 @@ func (ma *metaAdmin) getAdminAddresses() (registry, gov, staking, envStorage *co
 	if ma.registry != nil && ma.registry.To != nil {
 		registry = ma.registry.To
 	} else {
-		for i := uint64(0); i < 10; i++ {
-			addr := crypto.CreateAddress(ma.bootAccount, i)
-			contract.To = &addr
-
-			var v *big.Int
-			err = metclient.CallContract(ctx, contract, "magic", nil, &v, nil)
-			if err == nil && v.Cmp(magic) == 0 {
-				registry = &addr
-				break
-			}
-		}
-	}
-
-	if registry == nil {
-		if err == nil {
+		registry, err = ma.getRegistryAddress(ctx, ma.cli, ma.registry.Abi, nil)
+		if err != nil {
 			err = ethereum.NotFound
+			return
 		}
-		return
 	}
 	contract.To = registry
 
@@ -209,7 +248,7 @@ func (ma *metaAdmin) getAdminAddresses() (registry, gov, staking, envStorage *co
 		return
 	}
 
-	log.Debug("Metadium Contract Address",
+	log.Debug("Wemix Contract Address",
 		hex.EncodeToString(n1[:]), a1.Hex(),
 		hex.EncodeToString(n2[:]), a2.Hex(),
 		hex.EncodeToString(n3[:]), a3.Hex())
@@ -218,22 +257,71 @@ func (ma *metaAdmin) getAdminAddresses() (registry, gov, staking, envStorage *co
 	return
 }
 
-func (ma *metaAdmin) getInt(ctx context.Context, contract *metclient.RemoteContract, block *big.Int, name string) (int, error) {
+func (ma *wemixAdmin) getInt(ctx context.Context, contract *metclient.RemoteContract, block *big.Int, name string) (int64, error) {
 	var v *big.Int
 	err := metclient.CallContract(ctx, contract, name, nil, &v, block)
 	if err != nil {
 		return 0, err
 	} else {
-		return int(v.Int64()), nil
+		return v.Int64(), nil
 	}
 }
 
-// returns []*metaNode from map[string]*metaNode
-func (ma *metaAdmin) getNodes() []*metaNode {
+// TODO: error handling
+func (ma *wemixAdmin) getRegGovEnvContracts(ctx context.Context, height *big.Int) (reg, gov, env *metclient.RemoteContract, err error) {
+	if ma.registry == nil {
+		err = wemixminer.ErrNotInitialized
+		return
+	}
+	reg = &metclient.RemoteContract{
+		Cli: ma.cli,
+		Abi: ma.registry.Abi,
+	}
+	env = &metclient.RemoteContract{
+		Cli: ma.cli,
+		Abi: ma.envStorage.Abi,
+	}
+	gov = &metclient.RemoteContract{
+		Cli: ma.cli,
+		Abi: ma.gov.Abi,
+	}
+	if ma.registry.To != nil {
+		reg.To = ma.registry.To
+	} else {
+		var addr *common.Address
+		if addr, err = ma.getRegistryAddress(ctx, ma.cli, reg.Abi, height); err != nil {
+			err = wemixminer.ErrNotInitialized
+			return
+		}
+		reg.To = addr
+	}
+
+	var addr common.Address
+	input := []interface{}{metclient.ToBytes32("GovernanceContract")}
+	if err = metclient.CallContract(ctx, reg, "getContractAddress", input, &addr, height); err != nil {
+		err = wemixminer.ErrNotInitialized
+		return
+	}
+	gov.To = &common.Address{}
+	gov.To.SetBytes(addr.Bytes())
+
+	input = []interface{}{metclient.ToBytes32("EnvStorage")}
+	if err = metclient.CallContract(ctx, reg, "getContractAddress", input, &addr, height); err != nil {
+		err = wemixminer.ErrNotInitialized
+		return
+	}
+	env.To = &common.Address{}
+	env.To.SetBytes(addr.Bytes())
+
+	return
+}
+
+// returns []*wemixNode from map[string]*wemixNode
+func (ma *wemixAdmin) getNodes() []*wemixNode {
 	ma.lock.Lock()
 	defer ma.lock.Unlock()
 
-	var nodes []*metaNode
+	var nodes []*wemixNode
 	for _, i := range ma.nodes {
 		nodes = append(nodes, i)
 	}
@@ -241,19 +329,19 @@ func (ma *metaAdmin) getNodes() []*metaNode {
 }
 
 // returns
-// 1. currentMiner *metaNode: the current leader
-// 2. nextMiner *metaNode: the most eligible miner for the given height,
+// 1. currentMiner *wemixNode: the current leader
+// 2. nextMiner *wemixNode: the most eligible miner for the given height,
 //   which is up and running
-// 3. nodes []*metaNode: copies of map[string]*metaNode, not references,
+// 3. nodes []*wemixNode: copies of map[string]*wemixNode, not references,
 //   sorted by id, i.e. mining order
 // 'locked' indicates whether ma.lock is held by the caller or not
-func (ma *metaAdmin) getMinerNodes(height int, locked bool) (*metaNode, *metaNode, []*metaNode) {
-	var nodes []*metaNode
+func (ma *wemixAdmin) getMinerNodes(height int64, locked bool) (*wemixNode, *wemixNode, []*wemixNode) {
+	var nodes []*wemixNode
 	if !locked {
 		ma.lock.Lock()
 	}
 	for _, i := range ma.nodes {
-		n := new(metaNode)
+		n := new(wemixNode)
 		*n = *i
 		nodes = append(nodes, n)
 	}
@@ -277,8 +365,8 @@ func (ma *metaAdmin) getMinerNodes(height int, locked bool) (*metaNode, *metaNod
 	}
 
 	_, leaderNode := ma.etcdLeader(locked)
-	var miner, next *metaNode
-	ix := height / admin.blocksPer % len(nodes)
+	var miner, next *wemixNode
+	ix := int(height/admin.blocksPer) % len(nodes)
 	i := ix
 	for j := 0; j < len(nodes); j++ {
 		if miner != nil && next != nil {
@@ -299,19 +387,19 @@ func (ma *metaAdmin) getMinerNodes(height int, locked bool) (*metaNode, *metaNod
 }
 
 // get nodes from the Governance contract
-func (ma *metaAdmin) getMetaNodes(ctx context.Context, block *big.Int) ([]*metaNode, error) {
+func (ma *wemixAdmin) getWemixNodes(ctx context.Context, block *big.Int) ([]*wemixNode, error) {
 	var (
-		nodes           []*metaNode
+		nodes           []*wemixNode
 		addr            common.Address
 		name, enode, ip []byte
 		port            *big.Int
-		count           int
+		count           int64
 		input, output   []interface{}
 		err             error
 	)
 
 	count, err = ma.getInt(ctx, ma.gov, block, "getNodeLength")
-	for i := 1; i <= count; i++ {
+	for i := int64(1); i <= count; i++ {
 		input = []interface{}{big.NewInt(int64(i))}
 		output = []interface{}{&name, &enode, &ip, &port}
 		if err = metclient.CallContract(ctx, ma.gov, "getNode", input, &output, block); err != nil {
@@ -327,7 +415,7 @@ func (ma *metaAdmin) getMetaNodes(ctx context.Context, block *big.Int) ([]*metaN
 			return nil, ErrInvalidEnode
 		}
 		idv4, _ := toIdv4(sid)
-		nodes = append(nodes, &metaNode{
+		nodes = append(nodes, &wemixNode{
 			Name:  string(name),
 			Enode: sid,
 			Ip:    string(ip),
@@ -342,16 +430,81 @@ func (ma *metaAdmin) getMetaNodes(ctx context.Context, block *big.Int) ([]*metaN
 	return nodes, err
 }
 
-func (ma *metaAdmin) getRewardAccounts(ctx context.Context, block *big.Int) (rewardPoolAccount, maintenanceAccount *common.Address, members []*metaMember, err error) {
+func (ma *wemixAdmin) getRewardParams(ctx context.Context, height *big.Int) (*rewardParameters, error) {
+	rp := &rewardParameters{}
+	reg, gov, env, err := ma.getRegGovEnvContracts(ctx, height)
+	if err != nil {
+		return nil, err
+	}
+
+	if err = metclient.CallContract(ctx, env, "getBlockRewardAmount", nil, &rp.rewardAmount, height); err != nil {
+		return nil, err
+	}
+
+	rp.distributionMethod = make([]*big.Int, 4, 4)
+	if err = metclient.CallContract(ctx, env, "getBlockRewardDistributionMethod", nil, &rp.distributionMethod, height); err != nil {
+		return nil, err
+	}
+
+	var addr common.Address
+	input := []interface{}{metclient.ToBytes32("StakingReward")}
+	if err = metclient.CallContract(ctx, reg, "getContractAddress", input, &addr, height); err != nil {
+		return nil, err
+	}
+	rp.staker = &common.Address{}
+	rp.staker.SetBytes(addr.Bytes())
+
+	input = []interface{}{metclient.ToBytes32("Ecosystem")}
+	if err = metclient.CallContract(ctx, reg, "getContractAddress", input, &addr, height); err != nil {
+		return nil, err
+	}
+	rp.ecoSystem = &common.Address{}
+	rp.ecoSystem.SetBytes(addr.Bytes())
+
+	input = []interface{}{metclient.ToBytes32("Maintenance")}
+	if err = metclient.CallContract(ctx, reg, "getContractAddress", input, &addr, height); err != nil {
+		return nil, err
+	}
+	rp.maintenance = &common.Address{}
+	rp.maintenance.SetBytes(addr.Bytes())
+
+	rp.blocksPer, err = ma.getInt(ctx, env, height, "getBlocksPer")
+	if err != nil {
+		return nil, err
+	}
+
+	if count, err := ma.getInt(ctx, gov, height, "getMemberLength"); err != nil {
+		return nil, err
+	} else {
+		for i := int64(1); i <= count; i++ {
+			input = []interface{}{big.NewInt(int64(i))}
+			if err = metclient.CallContract(ctx, gov, "getReward", input, &addr, height); err != nil {
+				return nil, err
+			}
+			input = []interface{}{addr}
+			// NB. no staking consideration
+			// if err = metclient.CallContract(ctx, staking, "lockedBalanceOf", input, &stake, height); err != nil {
+			//	return nil, err
+			// }
+			rp.members = append(rp.members, &wemixMember{
+				Addr: addr,
+			})
+		}
+	}
+
+	return rp, nil
+}
+
+func (ma *wemixAdmin) getRewardAccounts(ctx context.Context, block *big.Int) (rewardPoolAccount, maintenanceAccount *common.Address, members []*wemixMember, err error) {
 	var (
 		addr  common.Address
-		count int
+		count int64
 		stake *big.Int
 		input []interface{}
 	)
 
 	if ma.registry == nil || ma.registry.To == nil {
-		err = metaminer.ErrNotInitialized
+		err = wemixminer.ErrNotInitialized
 		return
 	}
 
@@ -374,7 +527,7 @@ func (ma *metaAdmin) getRewardAccounts(ctx context.Context, block *big.Int) (rew
 		return
 	}
 
-	for i := 1; i <= count; i++ {
+	for i := int64(1); i <= count; i++ {
 		input = []interface{}{big.NewInt(int64(i))}
 		err = metclient.CallContract(ctx, ma.gov, "getReward", input,
 			&addr, block)
@@ -388,7 +541,7 @@ func (ma *metaAdmin) getRewardAccounts(ctx context.Context, block *big.Int) (rew
 			return
 		}
 
-		members = append(members, &metaMember{
+		members = append(members, &wemixMember{
 			Addr:  addr,
 			Stake: stake,
 		})
@@ -399,13 +552,15 @@ func (ma *metaAdmin) getRewardAccounts(ctx context.Context, block *big.Int) (rew
 
 // temporary internal structure to collect data from governance contracts
 type govdata struct {
-	blockNum, modifiedBlock                       int
-	blocksPer, maxIdleBlockInterval               int
-	gasPrice                                      *big.Int
-	nodes, addedNodes, updatedNodes, deletedNodes []*metaNode
+	blockNum, modifiedBlock                        int64
+	blockInterval, blocksPer, maxIdleBlockInterval int64
+	blockReward, maxPriorityFeePerGas              *big.Int
+	maxBaseFee, gasLimit                           *big.Int
+	baseFeeMaxChangeRate, gasTargetPercentage      int64
+	nodes, addedNodes, updatedNodes, deletedNodes  []*wemixNode
 }
 
-func (ma *metaAdmin) getGovData(refresh bool) (data *govdata, err error) {
+func (ma *wemixAdmin) getGovData(refresh bool) (data *govdata, err error) {
 	data = &govdata{}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -415,7 +570,7 @@ func (ma *metaAdmin) getGovData(refresh bool) (data *govdata, err error) {
 	if err != nil {
 		return
 	}
-	data.blockNum = int(block.Number.Int64())
+	data.blockNum = block.Number.Int64()
 	if !refresh && data.blockNum <= ma.lastBlock {
 		return
 	}
@@ -429,6 +584,12 @@ func (ma *metaAdmin) getGovData(refresh bool) (data *govdata, err error) {
 		return
 	}
 
+	data.blockInterval, err = ma.getInt(ctx, ma.envStorage, block.Number, "getBlockCreationTime")
+	if err != nil {
+		// TODO: ignore this error for now
+		data.blockInterval = ma.blockInterval
+		//return
+	}
 	data.blocksPer, err = ma.getInt(ctx, ma.envStorage, block.Number, "getBlocksPer")
 	if err != nil {
 		// TODO: ignore this error for now
@@ -438,15 +599,32 @@ func (ma *metaAdmin) getGovData(refresh bool) (data *govdata, err error) {
 	data.maxIdleBlockInterval, err = ma.getInt(ctx, ma.envStorage, block.Number, "getMaxIdleBlockInterval")
 	if err != nil {
 		// TODO: ignore this error for now
-		data.maxIdleBlockInterval = int(params.MaxIdleBlockInterval)
+		data.maxIdleBlockInterval = int64(params.MaxIdleBlockInterval)
 		//return
 	}
-	err = metclient.CallContract(ctx, ma.envStorage, "getGasPrice", nil, &data.gasPrice, block.Number)
+	err = metclient.CallContract(ctx, ma.envStorage, "getBlockRewardAmount", nil, &data.blockReward, block.Number)
+	if err != nil {
+		return
+	}
+	err = metclient.CallContract(ctx, ma.envStorage, "getMaxPriorityFeePerGas", nil, &data.maxPriorityFeePerGas, block.Number)
+	if err != nil {
+		return
+	}
+	gasLimitAndBaseFee := make([]*big.Int, 3, 3)
+	err = metclient.CallContract(ctx, ma.envStorage, "getGasLimitAndBaseFee", nil, &gasLimitAndBaseFee, block.Number)
+	if err != nil {
+		return
+	}
+	data.gasLimit = gasLimitAndBaseFee[0]
+	data.baseFeeMaxChangeRate = gasLimitAndBaseFee[1].Int64()
+	data.gasTargetPercentage = gasLimitAndBaseFee[2].Int64()
+
+	err = metclient.CallContract(ctx, ma.envStorage, "getMaxBaseFee", nil, &data.maxBaseFee, block.Number)
 	if err != nil {
 		return
 	}
 
-	data.nodes, err = ma.getMetaNodes(ctx, block.Number)
+	data.nodes, err = ma.getWemixNodes(ctx, block.Number)
 	if err != nil {
 		return
 	}
@@ -524,7 +702,7 @@ func StartAdmin(stack *node.Node, datadir string) {
 	}
 
 	cli := ethclient.NewClient(rpcCli)
-	admin = &metaAdmin{
+	admin = &wemixAdmin{
 		stack: stack,
 		lock:  &sync.Mutex{},
 		registry: &metclient.RemoteContract{
@@ -539,14 +717,13 @@ func StartAdmin(stack *node.Node, datadir string) {
 		rpcCli:      rpcCli,
 		cli:         cli,
 		blocksPer:   100,
-		gasPrice:    big.NewInt(100 * params.GWei),
 		etcdDir:     path.Join(datadir, "etcd"),
 		etcdTimeout: 30 * time.Second,
 	}
 
 	admin.bootNodeId, admin.bootAccount, err = admin.getGenesisInfo()
 	if err != nil {
-		utils.Fatalf("Cannot get contract address from genesis block: %v", err)
+		return
 	}
 
 	go admin.run()
@@ -558,7 +735,7 @@ func StartAdmin(stack *node.Node, datadir string) {
 	}()
 }
 
-func (ma *metaAdmin) addPeer(node *metaNode) error {
+func (ma *wemixAdmin) addPeer(node *wemixNode) error {
 	if node.Id == ma.nodeInfo.ID || ma.self == nil {
 		return nil
 	}
@@ -579,7 +756,7 @@ func (ma *metaAdmin) addPeer(node *metaNode) error {
 	return nil
 }
 
-func (ma *metaAdmin) update() {
+func (ma *wemixAdmin) update() {
 	refresh := false
 
 	registry, gov, staking, envStorage, err := ma.getAdminAddresses()
@@ -604,10 +781,16 @@ func (ma *metaAdmin) update() {
 		log.Debug(fmt.Sprintf("Modified Block: %d", data.modifiedBlock))
 
 		ma.modifiedBlock = data.modifiedBlock
+		ma.blockInterval = data.blockInterval
 		ma.blocksPer = data.blocksPer
-		ma.gasPrice = data.gasPrice
+		ma.blockReward = data.blockReward
+		ma.maxPriorityFeePerGas = data.maxPriorityFeePerGas
+		ma.maxBaseFee = data.maxBaseFee
+		ma.gasLimit = data.gasLimit
+		ma.baseFeeMaxChangeRate = data.baseFeeMaxChangeRate
+		ma.gasTargetPercentage = data.gasTargetPercentage
 
-		_nodes := map[string]*metaNode{}
+		_nodes := map[string]*wemixNode{}
 		for _, i := range data.nodes {
 			_nodes[i.Id] = i
 			if i.Id == ma.nodeInfo.ID {
@@ -647,21 +830,21 @@ func (ma *metaAdmin) update() {
 
 			var v *bool
 			err := ma.rpcCli.CallContext(ctx, &v, "miner_setGasPrice",
-				"0x"+data.gasPrice.Text(16))
+				"0x"+data.maxPriorityFeePerGas.Text(16))
 			if err != nil || !*v {
-				log.Info("Metadium: set minimum gas price failed",
-					"gas price", data.gasPrice, "error", err)
+				log.Info("set minimum gas price failed",
+					"maxPriorityFeePerGas", data.maxPriorityFeePerGas, "error", err)
 			} else {
-				log.Info("Metadium: Successfully set",
-					"gas price", data.gasPrice)
+				log.Info("successfully set",
+					"maxPriorityFeePerGas", data.maxPriorityFeePerGas)
 			}
 
 			if ma.self != nil && !bytes.Equal(ma.self.Addr[:], nilAddress[:]) {
 				err = ma.rpcCli.CallContext(ctx, &v, "miner_setEtherbase", &ma.self.Addr)
 				if err != nil || !*v {
-					log.Info("Metadium: set the coinbase", "error", err)
+					log.Info("set the coinbase", "error", err)
 				} else {
-					log.Info("Metadium: Successfully set the coinbase")
+					log.Info("successfully set the coinbase")
 				}
 			}
 		}
@@ -673,7 +856,7 @@ func (ma *metaAdmin) update() {
 	}
 }
 
-func (ma *metaAdmin) checkMining() {
+func (ma *wemixAdmin) checkMining() {
 	on := false
 	if ma.nodeInfo != nil && ma.nodeInfo.ID == admin.bootNodeId {
 		on = true
@@ -712,7 +895,7 @@ func (ma *metaAdmin) checkMining() {
 	}
 }
 
-func (ma *metaAdmin) run() {
+func (ma *wemixAdmin) run() {
 	lt := time.Now()
 	for {
 		if ma.nodeInfo == nil {
@@ -771,37 +954,7 @@ type reward struct {
 	Reward *big.Int       `json:"reward"`
 }
 
-/*
-// to get around 64 bit boundary. big.Float didn't help here.
-func distributeRewardsOld(six int, members []*metaMember, rewards []reward, amount int64) {
-	n := len(members)
-	var u int64
-	for i := 0; i < n; i++ {
-		rewards[i].Addr = members[i].Addr
-		u += int64(members[i].Stake.Int64())
-	}
-
-	var h, l uint64 = uint64(amount) >> 32, uint64(amount) & uint64(0x0FFFFFFFF)
-	var hd, ld float64 = float64(h) / float64(u), float64(l) / float64(u) // slopes
-	var hv, lv, vi float64 = 0, 0, 0
-	var s, vj uint64
-
-	for i := 0; i < n; i++ {
-		s = uint64(members[six].Stake.Int64())
-		vi = hv + hd*float64(s)
-		vj = uint64(math.Floor(vi+.5)-math.Floor(hv+.5)) << 32
-		hv = vi
-		vi = lv + ld*float64(s)
-		vj += uint64(math.Floor(vi+.5) - math.Floor(lv+.5))
-		lv = vi
-		rewards[six].Reward = vj
-
-		six = (six + 1) % n
-	}
-}
-*/
-
-func distributeRewards(six int, rewardPoolAccount, maintenanceAccount *common.Address, members []*metaMember, rewards []reward, amount *big.Int) {
+func distributeRewards_old(six int, rewardPoolAccount, maintenanceAccount *common.Address, members []*wemixMember, rewards []reward, amount *big.Int) {
 	n := len(members)
 
 	v0 := big.NewInt(0)
@@ -871,7 +1024,7 @@ func distributeRewards(six int, rewardPoolAccount, maintenanceAccount *common.Ad
 	}
 }
 
-func (ma *metaAdmin) calculateRewards(num, blockReward, fees *big.Int, addBalance func(common.Address, *big.Int)) (coinbase *common.Address, rewards []byte, err error) {
+func (ma *wemixAdmin) calculateRewards_old(num, blockReward, fees *big.Int, addBalance func(common.Address, *big.Int)) (coinbase *common.Address, rewards []byte, err error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -882,13 +1035,13 @@ func (ma *metaAdmin) calculateRewards(num, blockReward, fees *big.Int, addBalanc
 	}
 
 	if rewardPoolAccount == nil && maintenanceAccount == nil && len(members) == 0 {
-		err = metaminer.ErrNotInitialized
+		err = wemixminer.ErrNotInitialized
 		return
 	}
 
 	// determine coinbase
 	if len(members) > 0 {
-		mix := int(num.Int64()) / ma.blocksPer % len(members)
+		mix := int(num.Int64()/ma.blocksPer) % len(members)
 		coinbase = &common.Address{}
 		coinbase.SetBytes(members[mix].Addr.Bytes())
 	}
@@ -907,7 +1060,7 @@ func (ma *metaAdmin) calculateRewards(num, blockReward, fees *big.Int, addBalanc
 	}
 
 	rr := make([]reward, n)
-	distributeRewards(six, rewardPoolAccount, maintenanceAccount, members, rr,
+	distributeRewards_old(six, rewardPoolAccount, maintenanceAccount, members, rr,
 		new(big.Int).Add(blockReward, fees))
 
 	if addBalance != nil {
@@ -920,7 +1073,7 @@ func (ma *metaAdmin) calculateRewards(num, blockReward, fees *big.Int, addBalanc
 	return
 }
 
-func (ma *metaAdmin) verifyRewards(r1, r2 []byte) error {
+func (ma *wemixAdmin) verifyRewards(r1, r2 []byte) error {
 	var err error
 	var a, b []reward
 
@@ -945,6 +1098,111 @@ func (ma *metaAdmin) verifyRewards(r1, r2 []byte) error {
 	return nil
 }
 
+// new rewards
+// TODO: needs to check errors or inconsistencies
+//   - incorrect parametesr, i.e. distribution methods values don't add up to 1000
+//   - missing addresses
+//   - etc.
+func distributeRewards(height *big.Int, rp *rewardParameters, fees *big.Int) ([]reward, error) {
+	dm := new(big.Int)
+	for i := 0; i < len(rp.distributionMethod); i++ {
+		dm.Add(dm, rp.distributionMethod[i])
+	}
+	if dm.Int64() != 10000 {
+		return nil, wemixminer.ErrNotInitialized
+	}
+
+	v10000 := big.NewInt(10000)
+	minerAmount := new(big.Int).Set(rp.rewardAmount)
+	minerAmount.Div(minerAmount.Mul(minerAmount, rp.distributionMethod[0]), v10000)
+	stakerAmount := new(big.Int).Set(rp.rewardAmount)
+	stakerAmount.Div(stakerAmount.Mul(stakerAmount, rp.distributionMethod[1]), v10000)
+	ecoSystemAmount := new(big.Int).Set(rp.rewardAmount)
+	ecoSystemAmount.Div(ecoSystemAmount.Mul(ecoSystemAmount, rp.distributionMethod[2]), v10000)
+	// the rest goes to maintenance
+	maintenanceAmount := new(big.Int).Set(rp.rewardAmount)
+	maintenanceAmount.Sub(maintenanceAmount, minerAmount)
+	maintenanceAmount.Sub(maintenanceAmount, stakerAmount)
+	maintenanceAmount.Sub(maintenanceAmount, ecoSystemAmount)
+
+	// fees go to maintenance
+	maintenanceAmount.Add(maintenanceAmount, fees)
+
+	var rewards []reward
+	if n := len(rp.members); n > 0 {
+		v0, v1 := big.NewInt(0), big.NewInt(1)
+		vn := big.NewInt(int64(n))
+		b := new(big.Int).Set(minerAmount)
+		d := new(big.Int)
+		d.Div(b, vn)
+		for i := 0; i < n; i++ {
+			rewards = append(rewards, reward{
+				Addr:   rp.members[i].Addr,
+				Reward: new(big.Int).Set(d),
+			})
+		}
+		d.Mul(d, vn)
+		b.Sub(b, d)
+		for i, ix := 0, height.Int64()%int64(n); b.Cmp(v0) > 0; i, ix = i+1, (ix+1)%int64(n) {
+			rewards[ix].Reward.Add(rewards[ix].Reward, v1)
+			b.Sub(b, v1)
+		}
+	}
+	rewards = append(rewards, reward{
+		Addr:   *rp.staker,
+		Reward: stakerAmount,
+	})
+	rewards = append(rewards, reward{
+		Addr:   *rp.ecoSystem,
+		Reward: ecoSystemAmount,
+	})
+	rewards = append(rewards, reward{
+		Addr:   *rp.maintenance,
+		Reward: maintenanceAmount,
+	})
+	return rewards, nil
+}
+
+func (ma *wemixAdmin) calculateRewards(num, blockReward, fees *big.Int, addBalance func(common.Address, *big.Int)) (coinbase *common.Address, rewards []byte, err error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	rp, err := ma.getRewardParams(ctx, big.NewInt(num.Int64()-1))
+	if err != nil {
+		// all goes to the coinbase
+		err = wemixminer.ErrNotInitialized
+		return
+	}
+
+	// TODO: need more basic checks
+	if rp.staker == nil && rp.ecoSystem == nil && rp.maintenance == nil && len(rp.members) == 0 {
+		err = wemixminer.ErrNotInitialized
+		return
+	}
+
+	// determine coinbase
+	if len(rp.members) > 0 {
+		mix := int(num.Int64()/ma.blocksPer) % len(rp.members)
+		coinbase = &common.Address{}
+		coinbase.SetBytes(rp.members[mix].Addr.Bytes())
+	}
+
+	rr, errr := distributeRewards(num, rp, fees)
+	if errr != nil {
+		err = errr
+		return
+	}
+
+	if addBalance != nil {
+		for _, i := range rr {
+			addBalance(i.Addr, i.Reward)
+		}
+	}
+
+	rewards, err = json.Marshal(rr)
+	return
+}
+
 func calculateRewards(num, blockReward, fees *big.Int, addBalance func(common.Address, *big.Int)) (*common.Address, []byte, error) {
 	return admin.calculateRewards(num, blockReward, fees, addBalance)
 }
@@ -956,7 +1214,7 @@ func verifyRewards(num *big.Int, rewards string) error {
 
 func signBlock(hash common.Hash) (nodeId, sig []byte, err error) {
 	if admin == nil {
-		err = metaminer.ErrNotInitialized
+		err = wemixminer.ErrNotInitialized
 		return
 	}
 
@@ -972,7 +1230,7 @@ func verifyBlockSig(height *big.Int, nodeId []byte, hash common.Hash, sig []byte
 	return err == nil && nodeId != nil && len(pubKey) > 1 && bytes.Equal(nodeId, pubKey[1:])
 }
 
-func (ma *metaAdmin) getNodeInfo() (*p2p.NodeInfo, error) {
+func (ma *wemixAdmin) getNodeInfo() (*p2p.NodeInfo, error) {
 	var nodeInfo *p2p.NodeInfo
 	ctx, cancel := context.WithCancel(context.Background())
 	err := ma.rpcCli.CallContext(ctx, &nodeInfo, "admin_nodeInfo")
@@ -983,7 +1241,7 @@ func (ma *metaAdmin) getNodeInfo() (*p2p.NodeInfo, error) {
 	return nodeInfo, err
 }
 
-func (ma *metaAdmin) getPeerInfo(id string) (*p2p.NodeInfo, error) {
+func (ma *wemixAdmin) getPeerInfo(id string) (*p2p.NodeInfo, error) {
 	var nodeInfo *p2p.NodeInfo
 	ctx, cancel := context.WithCancel(context.Background())
 	err := ma.rpcCli.CallContext(ctx, &nodeInfo, "admin_peerInfo", id)
@@ -994,12 +1252,12 @@ func (ma *metaAdmin) getPeerInfo(id string) (*p2p.NodeInfo, error) {
 	return nodeInfo, err
 }
 
-func (ma *metaAdmin) isPeerUp(id string) bool {
+func (ma *wemixAdmin) isPeerUp(id string) bool {
 	nodeInfo, err := ma.getPeerInfo(id)
 	return err == nil && nodeInfo != nil
 }
 
-func (ma *metaAdmin) amPartner() bool {
+func (ma *wemixAdmin) amPartner() bool {
 	if admin == nil {
 		return false
 	}
@@ -1053,7 +1311,7 @@ func AmHub(id string) int {
 	}
 }
 
-func (ma *metaAdmin) pendingEmpty() bool {
+func (ma *wemixAdmin) pendingEmpty() bool {
 	type txpool_status struct {
 		Pending hexutil.Uint `json:"pending"`
 		Queued  hexutil.Uint `json:"queued"`
@@ -1079,7 +1337,7 @@ func LogBlock(height int64, hash common.Hash) {
 	admin.lock.Lock()
 	defer admin.lock.Unlock()
 
-	work, err := json.Marshal(&metaWork{
+	work, err := json.Marshal(&wemixWork{
 		Height: height,
 		Hash:   hash,
 	})
@@ -1088,19 +1346,19 @@ func LogBlock(height int64, hash common.Hash) {
 	}
 
 	tstart := time.Now()
-	rev, err := admin.etcdPut("metadium-work", string(work))
+	rev, err := admin.etcdPut("work", string(work))
 	if err != nil {
-		log.Error("Metadium - failed to log the latest block",
+		log.Error("failed to log the latest block",
 			"height", height, "hash", hash, "took", time.Since(tstart))
 	} else {
-		log.Debug("Metadium - logged the latest block",
+		log.Debug("logged the latest block",
 			"height", height, "hash", hash, "took", time.Since(tstart))
 
 		if ((rev%etcdCompactFrequency == 0) && (rev > etcdCompactFrequency)) && (rev > etcdCompactWindow) {
 			defer func() {
 				go func() {
 					if err := admin.etcdCompact(rev - etcdCompactWindow + 1); err != nil {
-						log.Error("Metadium - failed to compact",
+						log.Error("failed to compact",
 							"rev", rev, "took", time.Since(tstart))
 					}
 				}()
@@ -1111,35 +1369,122 @@ func LogBlock(height int64, hash common.Hash) {
 	admin.blocksMined++
 	height++
 	if admin.blocksMined >= admin.blocksPer &&
-		int(height)%admin.blocksPer == 0 {
+		height%admin.blocksPer == 0 {
 		// time to yield leader role
 
-		_, next, _ := admin.getMinerNodes(int(height), true)
+		_, next, _ := admin.getMinerNodes(height, true)
 		if next.Id == admin.self.Id {
-			log.Debug("Metadium - yield to self", "mined", admin.blocksMined,
+			log.Debug("yield to self", "mined", admin.blocksMined,
 				"new miner", "self")
 		} else {
 			if err := admin.etcdMoveLeader(next.Name); err == nil {
-				log.Debug("Metadium - yielded", "mined", admin.blocksMined,
+				log.Debug("yielded", "mined", admin.blocksMined,
 					"new miner", next.Name)
 				admin.blocksMined = 0
 			} else {
-				log.Error("Metadium - yield failed", "mined", admin.blocksMined,
+				log.Error("yield failed", "mined", admin.blocksMined,
 					"new miner", next.Name, "error", err)
 			}
 		}
 	}
 }
 
-func suggestGasPrice() *big.Int {
-	if admin == nil || admin.gasPrice == nil {
-		return big.NewInt(100 * params.GWei)
-	} else {
-		return new(big.Int).Set(admin.gasPrice)
+func getMaxPriorityFeePerGas() *big.Int {
+	defaultFee := big.NewInt(100 * params.GWei)
+	if admin == nil || admin.envStorage == nil || admin.envStorage.To == nil {
+		return defaultFee
 	}
+	var fee *big.Int
+	if err := metclient.CallContract(context.Background(), admin.envStorage, "getMaxPriorityFeePerGas", nil, &fee, nil); err != nil {
+		return defaultFee
+	}
+	return fee
 }
 
-func (ma *metaAdmin) toMiningPeers(nodes []*metaNode) string {
+func suggestGasPrice() *big.Int {
+	defaultFee := big.NewInt(100 * params.GWei)
+	if admin == nil || admin.envStorage == nil || admin.envStorage.To == nil {
+		return defaultFee
+	}
+	var fee *big.Int
+	if err := metclient.CallContract(context.Background(), admin.envStorage, "getMaxPriorityFeePerGas", nil, &fee, nil); err != nil {
+		return defaultFee
+	}
+	return fee
+}
+
+func getBlockBuildParameters(height *big.Int) (blockInterval int64, maxBaseFee, gasLimit *big.Int, baseFeeMaxChangeRate, gasTargetPercentage int64, err error) {
+	err = wemixminer.ErrNotInitialized
+
+	blockBuildParamsLock.Lock()
+	if blockBuildParams != nil && blockBuildParams.height == height.Uint64() {
+		// use chached
+		blockInterval = blockBuildParams.blockInterval
+		maxBaseFee = blockBuildParams.maxBaseFee
+		gasLimit = blockBuildParams.gasLimit
+		baseFeeMaxChangeRate = blockBuildParams.baseFeeMaxChangeRate
+		gasTargetPercentage = blockBuildParams.gasTargetPercentage
+		blockBuildParamsLock.Unlock()
+		err = nil
+		return
+	}
+	blockBuildParamsLock.Unlock()
+
+	// default values
+	blockInterval = 15
+	maxBaseFee = big.NewInt(0)
+	gasLimit = big.NewInt(0)
+	baseFeeMaxChangeRate = 0
+	gasTargetPercentage = 100
+
+	if admin == nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var env *metclient.RemoteContract
+	if _, _, env, err = admin.getRegGovEnvContracts(ctx, height); err != nil {
+		err = wemixminer.ErrNotInitialized
+		return
+	}
+	var v *big.Int
+	if err = metclient.CallContract(ctx, env, "getBlockCreationTime", nil, &v, height); err != nil {
+		err = wemixminer.ErrNotInitialized
+		return
+	}
+	blockInterval = v.Int64()
+
+	gasLimitAndBaseFee := make([]*big.Int, 3, 3)
+	if err = metclient.CallContract(ctx, env, "getGasLimitAndBaseFee", nil, &gasLimitAndBaseFee, height); err != nil {
+		err = wemixminer.ErrNotInitialized
+		return
+	}
+	gasLimit = gasLimitAndBaseFee[0]
+	baseFeeMaxChangeRate = gasLimitAndBaseFee[1].Int64()
+	gasTargetPercentage = gasLimitAndBaseFee[2].Int64()
+
+	if err = metclient.CallContract(ctx, env, "getMaxBaseFee", nil, &maxBaseFee, height); err != nil {
+		err = wemixminer.ErrNotInitialized
+		return
+	}
+
+	// cache it
+	blockBuildParamsLock.Lock()
+	blockBuildParams = &blockBuildParameters{
+		height:               height.Uint64(),
+		blockInterval:        blockInterval,
+		maxBaseFee:           maxBaseFee,
+		gasLimit:             gasLimit,
+		baseFeeMaxChangeRate: baseFeeMaxChangeRate,
+		gasTargetPercentage:  gasTargetPercentage,
+	}
+	blockBuildParamsLock.Unlock()
+	err = nil
+	return
+}
+
+func (ma *wemixAdmin) toMiningPeers(nodes []*wemixNode) string {
 	var bb bytes.Buffer
 	for _, n := range nodes {
 		if bb.Len() != 0 {
@@ -1153,7 +1498,7 @@ func (ma *metaAdmin) toMiningPeers(nodes []*metaNode) string {
 	return bb.String()
 }
 
-func (ma *metaAdmin) miners() string {
+func (ma *wemixAdmin) miners() string {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -1161,7 +1506,7 @@ func (ma *metaAdmin) miners() string {
 	if err != nil {
 		return ""
 	}
-	height := int(block.Number.Int64())
+	height := block.Number.Int64()
 
 	_, _, nodes := ma.getMinerNodes(height+1, false)
 	return ma.toMiningPeers(nodes)
@@ -1172,7 +1517,7 @@ func Info() interface{} {
 		return ""
 	} else {
 		self := admin.self
-		var nodes []*metaNode
+		var nodes []*wemixNode
 		for _, i := range admin.nodes {
 			nodes = append(nodes, i)
 		}
@@ -1181,23 +1526,30 @@ func Info() interface{} {
 		})
 
 		info := &map[string]interface{}{
-			"consensus":     params.ConsensusMethod,
-			"registry":      admin.registry.To,
-			"governance":    admin.gov.To,
-			"staking":       admin.staking.To,
-			"modifiedblock": admin.modifiedBlock,
-			"blocksPer":     admin.blocksPer,
-			"self":          self,
-			"nodes":         nodes,
-			"miners":        admin.miners(),
-			"etcd":          admin.etcdInfo(),
-			"maxIdle":       params.MaxIdleBlockInterval,
+			"consensus":            params.ConsensusMethod,
+			"registry":             admin.registry.To,
+			"governance":           admin.gov.To,
+			"staking":              admin.staking.To,
+			"modifiedblock":        admin.modifiedBlock,
+			"blocksPer":            admin.blocksPer,
+			"blockInterval":        admin.blockInterval,
+			"blockReward":          admin.blockReward,
+			"maxPriorityFeePerGas": admin.maxPriorityFeePerGas,
+			"blockGasLimit":        admin.gasLimit,
+			"maxBaseFee":           admin.maxBaseFee,
+			"baseFeeMaxChangeRate": admin.baseFeeMaxChangeRate,
+			"gasTargetPercentage":  admin.gasTargetPercentage,
+			"self":                 self,
+			"nodes":                nodes,
+			"miners":               admin.miners(),
+			"etcd":                 admin.etcdInfo(),
+			"maxIdle":              params.MaxIdleBlockInterval,
 		}
 		return info
 	}
 }
 
-func getMinerStatus() *metaapi.MetadiumMinerStatus {
+func getMinerStatus() *wemixapi.WemixMinerStatus {
 	if admin == nil || admin.self == nil {
 		return nil
 	}
@@ -1209,7 +1561,7 @@ func getMinerStatus() *metaapi.MetadiumMinerStatus {
 	if err != nil {
 		return nil
 	}
-	height := int(header.Number.Int64())
+	height := header.Number.Int64()
 
 	_, _, nodes := admin.getMinerNodes(height+1, false)
 	miningPeers := admin.toMiningPeers(nodes)
@@ -1217,7 +1569,7 @@ func getMinerStatus() *metaapi.MetadiumMinerStatus {
 	admin.lock.Lock()
 	defer admin.lock.Unlock()
 
-	return &metaapi.MetadiumMinerStatus{
+	return &wemixapi.WemixMinerStatus{
 		NodeName:          admin.self.Name,
 		Enode:             admin.self.Enode,
 		Id:                admin.self.Id,
@@ -1233,7 +1585,7 @@ func getMinerStatus() *metaapi.MetadiumMinerStatus {
 
 // Returns the array of peer status
 // 'id' could be null, a name, node id (public key) or ip address of a miner
-func getMiners(id string, timeout int) []*metaapi.MetadiumMinerStatus {
+func getMiners(id string, timeout int) []*wemixapi.WemixMinerStatus {
 	if admin == nil {
 		return nil
 	}
@@ -1249,7 +1601,7 @@ func getMiners(id string, timeout int) []*metaapi.MetadiumMinerStatus {
 
 	nodes := admin.getNodes()
 
-	var node *metaNode
+	var node *wemixNode
 	for _, n := range nodes {
 		if strings.EqualFold(n.Name, id) || strings.EqualFold(n.Id, id) || strings.EqualFold(n.Ip, id) {
 			node = n
@@ -1257,8 +1609,8 @@ func getMiners(id string, timeout int) []*metaapi.MetadiumMinerStatus {
 		}
 	}
 
-	getDownStatus := func(node *metaNode) *metaapi.MetadiumMinerStatus {
-		return &metaapi.MetadiumMinerStatus{
+	getDownStatus := func(node *wemixNode) *wemixapi.WemixMinerStatus {
+		return &wemixapi.WemixMinerStatus{
 			NodeName: node.Name,
 			Enode:    node.Enode,
 			Id:       node.Id,
@@ -1268,18 +1620,18 @@ func getMiners(id string, timeout int) []*metaapi.MetadiumMinerStatus {
 		}
 	}
 
-	var miners []*metaapi.MetadiumMinerStatus
+	var miners []*wemixapi.WemixMinerStatus
 	var err error
 	msgch := make(chan interface{}, len(nodes)*2+1)
-	metaapi.SetMsgChannel(msgch)
+	wemixapi.SetMsgChannel(msgch)
 	defer func() {
-		metaapi.SetMsgChannel(nil)
+		wemixapi.SetMsgChannel(nil)
 		close(msgch)
 	}()
 
 	startTime := time.Now().UnixNano()
 	timer := time.NewTimer(time.Duration(timeout) * time.Second)
-	peers := map[string]*metaNode{}
+	peers := map[string]*wemixNode{}
 	count := 0
 
 	if node != nil {
@@ -1293,7 +1645,7 @@ func getMiners(id string, timeout int) []*metaapi.MetadiumMinerStatus {
 
 		err = admin.rpcCli.CallContext(ctx, nil, "admin_requestMinerStatus", &node.Id)
 		if err != nil {
-			log.Error("Metadium RequestMinerStatus Failed", "id", node.Id, "error", err)
+			log.Error("RequestMinerStatus Failed", "id", node.Id, "error", err)
 			status := getDownStatus(node)
 			status.RttMs = big.NewInt((time.Now().UnixNano() - startTime) / 1000000)
 			miners = append(miners, status)
@@ -1316,7 +1668,7 @@ func getMiners(id string, timeout int) []*metaapi.MetadiumMinerStatus {
 				status := getDownStatus(n)
 				status.RttMs = big.NewInt((time.Now().UnixNano() - startTime) / 1000000)
 				miners = append(miners, status)
-				log.Error("Metadium RequestMinerStatus Failed", "id", n.Id, "error", err)
+				log.Error("RequestMinerStatus Failed", "id", n.Id, "error", err)
 			} else {
 				peers[n.Name] = n
 				count++
@@ -1334,7 +1686,7 @@ func getMiners(id string, timeout int) []*metaapi.MetadiumMinerStatus {
 		}
 		select {
 		case msg := <-msgch:
-			s, ok := msg.(*metaapi.MetadiumMinerStatus)
+			s, ok := msg.(*wemixapi.WemixMinerStatus)
 			if !ok {
 				continue
 			}
@@ -1370,7 +1722,7 @@ func getMiners(id string, timeout int) []*metaapi.MetadiumMinerStatus {
 	return miners
 }
 
-func (ma *metaAdmin) getTxPoolStatus() (pending, queued uint, err error) {
+func (ma *wemixAdmin) getTxPoolStatus() (pending, queued uint, err error) {
 	var data map[string]hexutil.Uint
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1444,28 +1796,29 @@ func verifyBlockRewards(height *big.Int) interface{} {
 }
 
 func init() {
-	metaminer.IsMinerFunc = IsMiner
-	metaminer.AmPartnerFunc = AmPartner
-	metaminer.IsPartnerFunc = IsPartner
-	metaminer.AmHubFunc = AmHub
-	metaminer.LogBlockFunc = LogBlock
-	metaminer.SuggestGasPriceFunc = suggestGasPrice
-	metaminer.CalculateRewardsFunc = calculateRewards
-	metaminer.VerifyRewardsFunc = verifyRewards
-	metaminer.SignBlockFunc = signBlock
-	metaminer.VerifyBlockSigFunc = verifyBlockSig
-	metaminer.RequirePendingTxsFunc = requirePendingTxs
-	metaminer.VerifyBlockRewardsFunc = verifyBlockRewards
-	metaapi.Info = Info
-	metaapi.GetMiners = getMiners
-	metaapi.GetMinerStatus = getMinerStatus
-	metaapi.EtcdInit = EtcdInit
-	metaapi.EtcdAddMember = EtcdAddMember
-	metaapi.EtcdRemoveMember = EtcdRemoveMember
-	metaapi.EtcdJoin = EtcdJoin
-	metaapi.EtcdMoveLeader = EtcdMoveLeader
-	metaapi.EtcdGetWork = EtcdGetWork
-	metaapi.EtcdDeleteWork = EtcdDeleteWork
+	wemixminer.IsMinerFunc = IsMiner
+	wemixminer.AmPartnerFunc = AmPartner
+	wemixminer.IsPartnerFunc = IsPartner
+	wemixminer.AmHubFunc = AmHub
+	wemixminer.LogBlockFunc = LogBlock
+	wemixminer.SuggestGasPriceFunc = suggestGasPrice
+	wemixminer.CalculateRewardsFunc = calculateRewards
+	wemixminer.VerifyRewardsFunc = verifyRewards
+	wemixminer.SignBlockFunc = signBlock
+	wemixminer.VerifyBlockSigFunc = verifyBlockSig
+	wemixminer.RequirePendingTxsFunc = requirePendingTxs
+	wemixminer.VerifyBlockRewardsFunc = verifyBlockRewards
+	wemixminer.GetBlockBuildParametersFunc = getBlockBuildParameters
+	wemixapi.Info = Info
+	wemixapi.GetMiners = getMiners
+	wemixapi.GetMinerStatus = getMinerStatus
+	wemixapi.EtcdInit = EtcdInit
+	wemixapi.EtcdAddMember = EtcdAddMember
+	wemixapi.EtcdRemoveMember = EtcdRemoveMember
+	wemixapi.EtcdJoin = EtcdJoin
+	wemixapi.EtcdMoveLeader = EtcdMoveLeader
+	wemixapi.EtcdGetWork = EtcdGetWork
+	wemixapi.EtcdDeleteWork = EtcdDeleteWork
 }
 
 /* EOF */

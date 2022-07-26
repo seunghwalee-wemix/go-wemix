@@ -38,6 +38,7 @@ import (
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/trie"
+	wemixminer "github.com/ethereum/go-ethereum/wemix/miner"
 )
 
 //go:generate gencodec -type Genesis -field-override genesisSpecMarshaling -out gen_genesis.go
@@ -62,9 +63,9 @@ type Genesis struct {
 	// in actual genesis blocks.
 	Number     uint64      `json:"number"`
 	GasUsed    uint64      `json:"gasUsed"`
-	Fees       uint64      `json:"fees"`
 	ParentHash common.Hash `json:"parentHash"`
 	BaseFee    *big.Int    `json:"baseFeePerGas"`
+	Fees       *big.Int    `json:"fees"`
 }
 
 // GenesisAlloc specifies the initial state that is part of the genesis block.
@@ -168,7 +169,7 @@ func SetupGenesisBlockWithOverride(db ethdb.Database, genesis *Genesis, override
 	stored := rawdb.ReadCanonicalHash(db, 0)
 	if (stored == common.Hash{}) {
 		if genesis == nil {
-			log.Info("Writing default metadium main-net genesis block")
+			log.Info("Writing default wemix main-net genesis block")
 			genesis = DefaultGenesisBlock()
 		} else {
 			log.Info("Writing custom genesis block")
@@ -224,7 +225,7 @@ func SetupGenesisBlockWithOverride(db ethdb.Database, genesis *Genesis, override
 	// Special case: don't change the existing config of a non-mainnet chain if no new
 	// config is supplied. These chains would get AllProtocolChanges (and a compat error)
 	// if we just continued here.
-	if genesis == nil && !(stored == params.MainnetGenesisHash || stored == params.MetadiumMainnetGenesisHash) {
+	if genesis == nil && !(stored == params.MainnetGenesisHash || stored == params.WemixMainnetGenesisHash) {
 		return storedcfg, stored, nil
 	}
 	// Check config compatibility and write the config. Compatibility errors
@@ -243,10 +244,10 @@ func SetupGenesisBlockWithOverride(db ethdb.Database, genesis *Genesis, override
 
 func (g *Genesis) configOrDefault(ghash common.Hash) *params.ChainConfig {
 	switch {
-	case ghash == params.MetadiumMainnetGenesisHash:
-		return params.MetadiumMainnetChainConfig
-	case ghash == params.MetadiumTestnetGenesisHash:
-		return params.MetadiumTestnetChainConfig
+	case ghash == params.WemixMainnetGenesisHash:
+		return params.WemixMainnetChainConfig
+	case ghash == params.WemixTestnetGenesisHash:
+		return params.WemixTestnetChainConfig
 	case g != nil:
 		return g.Config
 	case ghash == params.MainnetGenesisHash:
@@ -365,9 +366,9 @@ func GenesisBlockForTesting(db ethdb.Database, addr common.Address, balance *big
 
 func loadDefaultGenesisFile() (*Genesis, error) {
 	genesis := new(Genesis)
-	if _, err := os.Stat(params.MetadiumGenesisFile); err == nil {
-		log.Info("Loading found genesis file", "name", params.MetadiumGenesisFile)
-		file, err := os.Open(params.MetadiumGenesisFile)
+	if _, err := os.Stat(params.WemixGenesisFile); err == nil {
+		log.Info("Loading found genesis file", "name", params.WemixGenesisFile)
+		file, err := os.Open(params.WemixGenesisFile)
 		if err != nil {
 			return nil, err
 		}
@@ -389,17 +390,10 @@ func DefaultGenesisBlock() *Genesis {
 	)
 
 	if genesis, err = loadDefaultGenesisFile(); err != nil {
-		panic(fmt.Sprintf("Cannot open %s file: %v", params.MetadiumGenesisFile, err))
+		panic(fmt.Sprintf("Cannot open %s file: %v", params.WemixGenesisFile, err))
 	} else if genesis != nil && err == nil {
 		return genesis
-	} else {
-		genesis = new(Genesis)
-		if err := json.NewDecoder(strings.NewReader(metadiumMainnetGenesisJson)).Decode(genesis); err != nil {
-			panic("Cannot parse default metadium mainnet genesis.")
-		}
-		return genesis
-	}
-	/*
+	} else if wemixminer.IsPoW() {
 		return &Genesis{
 			Config:     params.MainnetChainConfig,
 			Nonce:      66,
@@ -408,7 +402,13 @@ func DefaultGenesisBlock() *Genesis {
 			Difficulty: big.NewInt(17179869184),
 			Alloc:      decodePrealloc(mainnetAllocData),
 		}
-	*/
+	} else {
+		genesis = new(Genesis)
+		if err := json.NewDecoder(strings.NewReader(wemixMainnetGenesisJson)).Decode(genesis); err != nil {
+			panic("Cannot parse default wemix mainnet genesis.")
+		}
+		return genesis
+	}
 }
 
 // DefaultTestnetGenesisBlock returns the Ropsten network genesis block.
@@ -419,13 +419,13 @@ func DefaultTestnetGenesisBlock() *Genesis {
 	)
 
 	if genesis, err = loadDefaultGenesisFile(); err != nil {
-		panic(fmt.Sprintf("Cannot open %s file: %v", params.MetadiumGenesisFile, err))
+		panic(fmt.Sprintf("Cannot open %s file: %v", params.WemixGenesisFile, err))
 	} else if genesis != nil && err == nil {
 		return genesis
 	} else {
 		genesis = new(Genesis)
-		if err := json.NewDecoder(strings.NewReader(metadiumTestnetGenesisJson)).Decode(genesis); err != nil {
-			panic("Cannot parse default metadium testnet genesis.")
+		if err := json.NewDecoder(strings.NewReader(wemixTestnetGenesisJson)).Decode(genesis); err != nil {
+			panic("Cannot parse default wemix testnet genesis.")
 		}
 		return genesis
 	}

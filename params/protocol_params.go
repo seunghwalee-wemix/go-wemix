@@ -179,13 +179,14 @@ const (
 	ConsensusMax
 )
 
-// metadium parameters
+// wemix parameters
 var (
-	ConsensusMethod      int    = ConsensusPoA // consensus method
+	ConsensusMethod      int    = ConsensusPoW // consensus method
 	FixedDifficulty      uint64 = 1            // 0 means no fixed difficulty
-	FixedGasLimit        uint64 = 105000000    // 5000 * 21000, 0 means no fixed gas limit,
+	FixedGasLimit        uint64 = 0            // 0 means no fixed gas limit,
 	MaxIdleBlockInterval uint64 = 600          // in seconds
 	BlocksPerTurn        uint64 = 100
+	DropUnderPriced      bool   = true // drop underpriced transactions
 
 	NonceLimit     uint64 = 0    // nonce limit for non-governing accounts
 	UseRocksDb     int    = 1    // LevelDB (0) or RocksDB (1)
