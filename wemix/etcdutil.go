@@ -64,7 +64,7 @@ func (ma *wemixAdmin) etcdMemberExists(name, cluster string) (bool, error) {
 }
 
 // fill the missing name in cluster string when a member is just added, like
-// "=http://1.1.1.1:8590,wemix2=http:/1.1.1.2:8590"
+// "=https://1.1.1.1:8590,wemix2=https:/1.1.1.2:8590"
 func (ma *wemixAdmin) etcdFixCluster(cluster string) (string, error) {
 	if ma.self == nil {
 		return "", ethereum.NotFound
@@ -114,11 +114,11 @@ func (ma *wemixAdmin) etcdNewConfig(newCluster bool) *embed.Config {
 	cfg.LogLevel = "error"
 	cfg.Dir = ma.etcdDir
 	cfg.Name = ma.self.Name
-	u, _ := url.Parse(fmt.Sprintf("http://%s:%d", "0.0.0.0", ma.self.Port+1))
+	u, _ := url.Parse(fmt.Sprintf("https://%s:%d", "0.0.0.0", ma.self.Port+1))
 	cfg.LPUrls = []url.URL{*u}
-	u, _ = url.Parse(fmt.Sprintf("http://%s:%d", ma.self.Ip, ma.self.Port+1))
+	u, _ = url.Parse(fmt.Sprintf("https://%s:%d", ma.self.Ip, ma.self.Port+1))
 	cfg.APUrls = []url.URL{*u}
-	u, _ = url.Parse(fmt.Sprintf("http://localhost:%d", ma.self.Port+2))
+	u, _ = url.Parse(fmt.Sprintf("https://localhost:%d", ma.self.Port+2))
 	cfg.LCUrls = []url.URL{*u}
 	cfg.ACUrls = []url.URL{*u}
 	if newCluster {
@@ -127,7 +127,7 @@ func (ma *wemixAdmin) etcdNewConfig(newCluster bool) *embed.Config {
 	} else {
 		cfg.ClusterState = embed.ClusterStateFlagExisting
 	}
-	cfg.InitialCluster = fmt.Sprintf("%s=http://%s:%d", ma.self.Name,
+	cfg.InitialCluster = fmt.Sprintf("%s=https://%s:%d", ma.self.Name,
 		ma.self.Ip, ma.self.Port+1)
 	cfg.InitialClusterToken = etcdClusterName
 	return cfg
@@ -184,7 +184,7 @@ func (ma *wemixAdmin) etcdAddMember(name string) (string, error) {
 	}
 
 	_, err := ma.etcdCli.MemberAdd(context.Background(),
-		[]string{fmt.Sprintf("http://%s:%d", node.Ip, node.Port+1)})
+		[]string{fmt.Sprintf("https://%s:%d", node.Ip, node.Port+1)})
 	if err != nil {
 		log.Error("failed to add a new member",
 			"name", name, "ip", node.Ip, "port", node.Port+1, "error", err)
